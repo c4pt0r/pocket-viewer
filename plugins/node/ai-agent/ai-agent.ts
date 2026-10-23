@@ -172,8 +172,9 @@ function cameraDescription(): string {
   const st = pv.state;
   if (typeof st.pan !== "number") return "Gimbal state unknown.";
   const z = (st.zoom ?? 100) / 100;
+  const [w, h] = Array.isArray(st.fov) && st.fov.length === 2 ? st.fov : [95, 53];  // StackChan reports its own
   return `Camera: pan ${st.actualPan.toFixed(0)}°, tilt ${st.actualTilt.toFixed(0)}°, zoom ${st.zoom?.toFixed(0)} ` +
-    `(field of view about ${(95 / z).toFixed(0)}° × ${(53 / z).toFixed(0)}°)` + (st.recording ? ", recording." : ".");
+    `(field of view about ${(w / z).toFixed(0)}° × ${(h / z).toFixed(0)}°)` + (st.recording ? ", recording." : ".");
 }
 
 const image = (f: VideoFrame) => ({ type: "image" as const, mimeType: "image/png", data: encodePNG(f).toString("base64") });

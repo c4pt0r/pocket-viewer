@@ -41,11 +41,14 @@ final class Follower {
 
     let ex = point.x - target.x, ey = point.y - target.y
     guard abs(ex) > deadzone || abs(ey) > deadzone else { return }
-    // Normalized error → degrees, for the current zoom and orientation.
+    // Normalized error → degrees, for the current zoom and orientation. A
+    // camera other than the Pocket 3 (StackChan) reports its own "fov".
     let zoom = max(1, (st["zoom"] as? Double ?? 100) / 100)
     let landscape = frame.width >= frame.height
-    let hfov = (landscape ? wideFOV : narrowFOV) / zoom
-    let vfov = (landscape ? narrowFOV : wideFOV) / zoom
+    let fov = st["fov"] as? [Double] ?? [wideFOV, narrowFOV]
+    let (wide, narrow) = fov.count == 2 ? (fov[0], fov[1]) : (wideFOV, narrowFOV)
+    let hfov = (landscape ? wide : narrow) / zoom
+    let vfov = (landscape ? narrow : wide) / zoom
     // +pan turns right, +tilt turns up (both measured). Absolute targets from
     // the real position, so nothing accumulates if a move falls short.
     let dpan = abs(ex) > deadzone ? max(-maxStep, min(maxStep, ex * hfov * gain)) : 0

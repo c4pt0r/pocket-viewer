@@ -2,7 +2,9 @@
 
 A small native macOS viewer, recorder and gimbal controller for the **DJI Osmo Pocket 3** in webcam (UVC) mode.
 
-> **Only the DJI Osmo Pocket 3 is supported at the moment.** The device is matched by its USB IDs (`2ca3:0023`) and name (`OsmoPocket3`), and the control ranges below are specific to it. Other DJI cameras or UVC webcams may expose different controls and are untested.
+> **StackChan:** an M5Stack StackChan robot can stand in for the Pocket 3 (`-d stackchan`): plugged in over USB, its head camera is the video and its servos the gimbal. See [stackchan/README.md](stackchan/README.md).
+
+> **Of cameras, only the DJI Osmo Pocket 3 is supported at the moment.** The device is matched by its USB IDs (`2ca3:0023`) and name (`OsmoPocket3`), and the control ranges below are specific to it. Other DJI cameras or UVC webcams may expose different controls and are untested.
 
 ## Features
 
@@ -42,9 +44,10 @@ On first launch, macOS asks for camera and microphone access. If you run the app
 
 | Option | |
 |---|---|
+| `-d stackchan` | use a StackChan robot on USB instead of the Pocket 3 ([details](stackchan/README.md)) |
 | `-s WxH` | initial resolution, e.g. `3840x2160` or `1080x1920` (portrait) |
 | `-r fps` | initial frame rate |
-| `-a name` | audio input (substring of its name) |
+| `-a name` | audio input (substring of its name); with `-d stackchan`, `none` for video only |
 | `-o dir` | where recordings go (default `~/Movies`) |
 | `-c codec` | `hevc`, `h264` or `prores` |
 | `-e` | start with echo cancellation on |

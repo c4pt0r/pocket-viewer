@@ -11,10 +11,14 @@
 //   v                   video scaling: fill (crop) / fit (letterbox) / stretch
 //   ⌘1..⌘9              switch resolution (also in the Resolution / Frame Rate menus)
 //
-// Usage: pocket-viewer [-s WxH] [-r fps] [-a audio] [-o dir] [-c codec] [-e] [-p cmd]... [-t secs] [-l]
+// Usage: pocket-viewer [-d device] [-s WxH] [-r fps] [-a audio] [-o dir] [-c codec] [-e] [-p cmd]... [-t secs] [-l]
+//   -d dev   stackchan or stackchan:/dev/cu.… — use an M5Stack StackChan running
+//            stackchan/firmware/stackchan-cam, plugged in over USB, as the camera and
+//            gimbal instead of the Pocket 3. Audio defaults to the Mac's input.
 //   -s WxH   initial resolution, e.g. 3840x2160 or 1080x1920 (portrait); default 1920x1080
 //   -r fps   initial frame rate; default the highest the resolution supports
 //   -a name  audio input to use (substring of its name, e.g. AG06); default the Pocket 3 mic.
+//            With StackChan, "none" runs video only without asking for microphone access.
 //            Also switchable at runtime from the Audio Input menu.
 //   -o dir   where recordings are saved; default the folder chosen in the Record menu (~/Movies)
 //   -c codec recording video codec: hevc, h264 or prores; default the Record menu choice (hevc)
@@ -31,17 +35,32 @@
 #import "echocancel.h"
 #import "moviewriter.h"
 #import "plugins.h"
+#import "stackchan.h"
 
 static NSString *const kDeviceName = @"OsmoPocket3";
 
 static double clampd(double x, double lo, double hi) { return x < lo ? lo : x > hi ? hi : x; }
+
+// The layer showing the video: the capture session's preview for the Pocket 3,
+// a sample buffer display layer for StackChan. Both scale by videoGravity.
+@protocol VideoLayer <NSObject>
+@property(copy) AVLayerVideoGravity videoGravity;
+@end
+@interface AVCaptureVideoPreviewLayer (VideoLayer) <VideoLayer>
+@end
+@implementation AVCaptureVideoPreviewLayer (VideoLayer)
+@end
+@interface AVSampleBufferDisplayLayer (VideoLayer) <VideoLayer>
+@end
+@implementation AVSampleBufferDisplayLayer (VideoLayer)
+@end
 
 // Draws what plugins send (boxes, lines, labels, subtitles) over the video.
 // Coordinates are normalized to the video frame, origin top-left, and follow
 // the preview's scaling mode. Each plugin layer is replaced wholesale by its
 // next draw and can expire on its own (ttl).
 @interface OverlayView : NSView
-@property(nonatomic, weak) AVCaptureVideoPreviewLayer *preview;
+@property(nonatomic, weak) CALayer<VideoLayer> *preview;
 @property(nonatomic) CGSize videoSize;
 @property(nonatomic) NSRect selection;  // ⌥-drag rubber band, normalized; empty when none
 - (NSPoint)normalize:(NSPoint)point;    // view point -> normalized video coordinates
@@ -241,7 +260,7 @@ static void drawLabel(NSString *text, NSPoint origin, double size, NSColor *colo
 @property(nonatomic) BOOL monitoring;
 @property(nonatomic) NSTextField *hud;
 @property(nonatomic, copy) NSString *formatInfo;
-@property(nonatomic) AVCaptureVideoPreviewLayer *preview;
+@property(nonatomic) CALayer<VideoLayer> *preview;
 @property(nonatomic) NSDate *recordingSince;  // nil when not recording
 @property(nonatomic, copy) NSMenu * (^menuProvider)(void);  // right-click menu
 @property(nonatomic) OverlayView *overlay;
@@ -668,7 +687,9 @@ static void drawLabel(NSString *text, NSPoint origin, double size, NSColor *colo
 @property(nonatomic) NSWindow *window;
 @property(nonatomic) ControlView *view;
 @property(nonatomic) AVCaptureSession *session;
-@property(nonatomic) AVCaptureDevice *videoDevice;
+@property(nonatomic) AVCaptureDevice *videoDevice;           // nil with StackChan
+@property(nonatomic) StackChanCamera *stackchan;             // set with -d stackchan
+@property(nonatomic) AVSampleBufferDisplayLayer *displayLayer;  // shows StackChan frames
 @property(nonatomic) NSMenu *resolutionMenu, *frameRateMenu;
 @property(nonatomic) CMVideoDimensions size;
 @property(nonatomic) double fps;
@@ -765,10 +786,22 @@ static NSString *fpsString(double fps) {
                            : [NSString stringWithFormat:@"%.2f", fps];
 }
 
-static NSString *optSize, *optFps, *optOutDir, *optAudio, *optCodec;
+static NSString *optSize, *optFps, *optOutDir, *optAudio, *optCodec, *optDevice;
 static double optRecordSecs;
 static BOOL optEchoCancel;
 static NSMutableArray<NSString *> *optPlugins;
+
+// The StackChan's serial port for -d stackchan[:PORT] (found on USB when not
+// given), else nil: the Pocket 3.
+static NSString *stackChanPort(void) {
+  static NSString *port;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    if ([optDevice isEqual:@"stackchan"]) port = stackchan_usb_port();
+    if ([optDevice hasPrefix:@"stackchan:"]) port = [optDevice substringFromIndex:10];
+  });
+  return port;
+}
 
 // {UID, name} of every CoreAudio device that has output streams. The UID is what
 // AVCaptureAudioPreviewOutput.outputDeviceUniqueID takes.
@@ -854,9 +887,26 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
   return nil;
 }
 
-@implementation AppDelegate
+@implementation AppDelegate {
+  CMVideoDimensions _streamSize;     // StackChan queue only
+  double _fpsWindowStart;            // StackChan queue only
+  int _fpsFrames;                    // StackChan queue only
+}
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+  if (stackChanPort()) {  // video comes over the serial link: no camera access needed
+    if ([optAudio isEqual:@"none"]) {
+      [self startWithAudio:NO];
+      return;
+    }
+    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
+                             completionHandler:^(BOOL audioOK) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [self startWithAudio:audioOK];
+      });
+    }];
+    return;
+  }
   [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo
                            completionHandler:^(BOOL videoOK) {
     [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
@@ -884,26 +934,32 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
     [NSApp terminate:nil];
   }
 
-  AVCaptureDevice *video = findCamera();
-  if (!video) {
-    NSLog(@"%@ camera not found", kDeviceName);
-    [NSApp terminate:nil];
+  // With StackChan the session carries audio only; video comes over its link.
+  AVCaptureDevice *video = nil;
+  if (!stackChanPort()) {
+    video = findCamera();
+    if (!video) {
+      NSLog(@"%@ camera not found", kDeviceName);
+      [NSApp terminate:nil];
+    }
   }
 
   AVCaptureSession *session = [AVCaptureSession new];
   NSError *err;
-  AVCaptureDeviceInput *vin = [AVCaptureDeviceInput deviceInputWithDevice:video error:&err];
-  if (!vin) {
-    NSLog(@"video input: %@", err);
-    [NSApp terminate:nil];
-  }
-  [session addInput:vin];
-  // On macOS the session re-applies its preset (and resets the camera to its
-  // default format) on startRunning and on every configuration commit, unless
-  // the device is locked for configuration. Hold the lock for the app's lifetime.
-  if (![video lockForConfiguration:&err]) {
-    NSLog(@"cannot lock camera for configuration: %@", err.localizedDescription);
-    [NSApp terminate:nil];
+  if (video) {
+    AVCaptureDeviceInput *vin = [AVCaptureDeviceInput deviceInputWithDevice:video error:&err];
+    if (!vin) {
+      NSLog(@"video input: %@", err);
+      [NSApp terminate:nil];
+    }
+    [session addInput:vin];
+    // On macOS the session re-applies its preset (and resets the camera to its
+    // default format) on startRunning and on every configuration commit, unless
+    // the device is locked for configuration. Hold the lock for the app's lifetime.
+    if (![video lockForConfiguration:&err]) {
+      NSLog(@"cannot lock camera for configuration: %@", err.localizedDescription);
+      [NSApp terminate:nil];
+    }
   }
 
   // Audio monitoring is off unless an output was chosen in the Audio Output menu (or m pressed).
@@ -944,7 +1000,9 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
   }
 
   AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
-  if ([session canAddOutput:movie]) {
+  if (!video) {
+    // StackChan frames never enter the session; they are recorded with the writer.
+  } else if ([session canAddOutput:movie]) {
     [session addOutput:movie];
     self.movieOutput = movie;
   } else {
@@ -960,12 +1018,18 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
                     defer:NO];
   self.window.title = [NSString stringWithFormat:@"%@ — arrows/drag: move, scroll: zoom, "
                                                  @"c: center, ,/.: roll, r: record, m: audio, v: scaling, f: fullscreen",
-                                                 video.localizedName];
+                                                 video ? video.localizedName : @"StackChan"];
 
   ControlView *view = [[ControlView alloc] initWithFrame:frame];
   view.session = session;
   view.monitor = monitor;
-  AVCaptureVideoPreviewLayer *preview = [AVCaptureVideoPreviewLayer layerWithSession:session];
+  CALayer<VideoLayer> *preview;
+  if (video) {
+    preview = [AVCaptureVideoPreviewLayer layerWithSession:session];
+  } else {
+    self.displayLayer = [AVSampleBufferDisplayLayer new];
+    preview = self.displayLayer;
+  }
   preview.videoGravity = AVLayerVideoGravityResizeAspectFill;
   view.preview = preview;
   view.overlay.preview = preview;
@@ -983,23 +1047,35 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
   [self buildMenus];
 
   if (audioOK) {
-    AVCaptureDevice *audio = findDevice(audioDevices(), optAudio ?: kDeviceName);
+    AVCaptureDevice *audio = video || optAudio ? findDevice(audioDevices(), optAudio ?: kDeviceName)
+                                               : [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
     if (audio)
       [self useAudioDevice:audio];
     else
       NSLog(@"audio input \"%@\" not found, running video only (run with -l to list inputs)",
             optAudio ?: kDeviceName);
+  } else if ([optAudio isEqual:@"none"]) {
+    NSLog(@"audio off (-a none), running video only");
   } else {
     NSLog(@"microphone access denied, running video only");
   }
 
-  CMVideoDimensions size = {1920, 1080};
-  int w, h;
-  if (optSize && sscanf(optSize.UTF8String, "%dx%d", &w, &h) == 2) size = (CMVideoDimensions){w, h};
-  double fps = optFps ? optFps.doubleValue : 0;
-  if (![self applySize:size fps:fps]) {
-    NSLog(@"%@@%@ not supported, run with -l to list formats", sizeString(size), optFps ?: @"max");
-    [NSApp terminate:nil];
+  if (video) {
+    CMVideoDimensions size = {1920, 1080};
+    int w, h;
+    if (optSize && sscanf(optSize.UTF8String, "%dx%d", &w, &h) == 2) size = (CMVideoDimensions){w, h};
+    double fps = optFps ? optFps.doubleValue : 0;
+    if (![self applySize:size fps:fps]) {
+      NSLog(@"%@@%@ not supported, run with -l to list formats", sizeString(size), optFps ?: @"max");
+      [NSApp terminate:nil];
+    }
+  } else {
+    self.view.formatInfo = @"connecting to StackChan…";
+    self.stackchan = [[StackChanCamera alloc] initWithPort:stackChanPort()];
+    __weak AppDelegate *weakSelf = self;
+    [self.stackchan startWithHandler:^(CMSampleBufferRef frame) {
+      [weakSelf stackChanFrame:frame];
+    }];
   }
 
   [self.window center];
@@ -1416,7 +1492,7 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
     return !recording && self.selectedAudio;
   } else if (a == @selector(toggleRecording:)) {
     item.title = recording ? @"Stop Recording" : @"Start Recording";
-    return self.movieOutput != nil;
+    return self.movieOutput != nil || (self.stackchan && self.size.width > 0);
   }
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
 
@@ -1434,7 +1510,7 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
 
 - (void)toggleRecording:(id)sender {
   AVCaptureMovieFileOutput *out = self.movieOutput;
-  if (!out) return;
+  if (!out && !self.stackchan) return;
   if (self.isRecording) {
     if (self.writer)
       [self finishWriter];
@@ -1454,8 +1530,9 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
   NSString *name = [NSString stringWithFormat:@"pocket-viewer-%@.mov", [df stringFromDate:NSDate.date]];
   NSURL *url = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]];
 
-  if (self.ec) {
-    // Echo-cancelled audio never reaches the capture session, so mux it ourselves.
+  if (self.ec || self.stackchan) {
+    // Echo-cancelled audio and StackChan video never reach the capture session's
+    // movie output, so mux them ourselves.
     NSDictionary *video = @{
       AVVideoCodecKey : videoCodecType(self.videoCodec),
       AVVideoWidthKey : @(self.size.width),
@@ -1493,12 +1570,49 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
   }];
 }
 
+// A StackChan frame (on its queue, already on the host clock): shown, and handed
+// on like the Pocket 3 frames in captureOutput.
+- (void)stackChanFrame:(CMSampleBufferRef)frame {
+  CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(frame);
+  CMVideoDimensions size = {(int32_t)CVPixelBufferGetWidth(pb), (int32_t)CVPixelBufferGetHeight(pb)};
+  if (!sameSize(size, _streamSize)) {
+    _streamSize = size;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self.size = size;
+      self.view.overlay.videoSize = CGSizeMake(size.width, size.height);
+      [self fitWindowToSize:size];
+    });
+  }
+  double now = CACurrentMediaTime();
+  _fpsFrames++;
+  if (now - _fpsWindowStart >= 1) {
+    double fps = _fpsFrames / (now - _fpsWindowStart);
+    _fpsWindowStart = now;
+    _fpsFrames = 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self.fps = fps;
+      self.view.formatInfo = [NSString stringWithFormat:@"%@@%.0f", sizeString(size), fps];
+    });
+  }
+
+  AVSampleBufferVideoRenderer *renderer = self.displayLayer.sampleBufferRenderer;
+  if (renderer.status == AVQueuedSampleBufferRenderingStatusFailed) [renderer flush];
+  [renderer enqueueSampleBuffer:frame];
+  if (self.snapshotPending) {
+    self.snapshotPending = NO;
+    [self saveSnapshot:pb];
+  }
+  [self.writer appendVideo:frame];
+  [self.plugins pushVideo:frame];
+}
+
 // Camera frames and session audio. Everything handed on is restamped onto the
 // host clock, which the echo-cancelled audio already uses.
 - (void)captureOutput:(AVCaptureOutput *)output
     didOutputSampleBuffer:(CMSampleBufferRef)buffer
            fromConnection:(AVCaptureConnection *)connection {
-  MovieWriter *writer = output == self.videoData ? self.writer : nil;
+  // The writer records session audio too when the video is StackChan's.
+  MovieWriter *writer = output == self.videoData || self.stackchan ? self.writer : nil;
   if (!writer && !self.plugins) return;
   CMSampleBufferRef hostTimed = NULL;
   CMTime pts = CMSampleBufferGetPresentationTimeStamp(buffer);
@@ -1520,6 +1634,7 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
     [writer appendVideo:hostTimed];
     [self.plugins pushVideo:hostTimed];
   } else {
+    [writer appendAudio:hostTimed];
     [self.plugins pushAudio:hostTimed];
   }
   CFRelease(hostTimed);
@@ -1628,6 +1743,7 @@ static NSString *titleForKey(NSArray<NSArray<NSString *> *> *choices, NSString *
   NSMutableDictionary *st = [self.view.gimbalState mutableCopy];
   st[@"video"] = @{@"width" : @(self.size.width), @"height" : @(self.size.height), @"fps" : @(self.fps)};
   st[@"recording"] = @(self.isRecording);
+  if (self.stackchan) st[@"fov"] = @[ @(kStackChanHorizontalFOV), @(kStackChanVerticalFOV) ];
   return st;
 }
 
@@ -1875,8 +1991,9 @@ static void listFormats(void) {
 int main(int argc, char **argv) {
   @autoreleasepool {
     int opt;
-    while ((opt = getopt(argc, argv, "s:r:a:o:c:t:p:elh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:s:r:a:o:c:t:p:elh")) != -1) {
       switch (opt) {
+        case 'd': optDevice = @(optarg); break;
         case 's': optSize = @(optarg); break;
         case 'r': optFps = @(optarg); break;
         case 'o': optOutDir = @(optarg); break;
@@ -1890,10 +2007,20 @@ int main(int argc, char **argv) {
           break;
         case 'l': listFormats(); return 0;
         default:
-          fprintf(stderr, "usage: pocket-viewer [-s WxH] [-r fps] [-a audio] [-o dir] [-c codec] [-e] [-p cmd]... [-t secs] [-l]\n");
+          fprintf(stderr, "usage: pocket-viewer [-d stackchan[:PORT]] [-s WxH] [-r fps] [-a audio] [-o dir] [-c codec] [-e] "
+                          "[-p cmd]... [-t secs] [-l]\n");
           return 2;
       }
     }
+    if (optDevice && ![optDevice isEqual:@"stackchan"] && ![optDevice hasPrefix:@"stackchan:"]) {
+      fprintf(stderr, "unknown device %s (use stackchan or stackchan:/dev/cu.…)\n", optDevice.UTF8String);
+      return 2;
+    }
+    if (optDevice && !stackChanPort()) {
+      fprintf(stderr, "no StackChan on USB (is it plugged in and running stackchan-cam?)\n");
+      return 1;
+    }
+    if (stackChanPort()) stackchan_use_as_gimbal(stackChanPort());
     NSApplication *app = NSApplication.sharedApplication;
     app.activationPolicy = NSApplicationActivationPolicyRegular;
     AppDelegate *delegate = [AppDelegate new];

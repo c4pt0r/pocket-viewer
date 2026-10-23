@@ -7,3 +7,6 @@ pocketctl
 .openai-key
 plugins/bin/
 node_modules/
+__pycache__/
+stackchan/firmware/.arduino/
+stackchan/firmware/*/build/

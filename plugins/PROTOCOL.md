@@ -27,7 +27,7 @@ pocket-viewer validates everything it receives. Malformed input, unknown types a
 | `audio` | `pts`, `rate`, `channels`, `frames`, `format` (`s16le`) | interleaved signed 16-bit little-endian samples |
 | `set` | `key`, `value` | — the user changed a setting declared with `options` |
 | `input` | `event`: `click` (`x`, `y`), `select` (`x`, `y`, `w`, `h`) or `cancel` | — see below |
-| `state` | `pan`, `tilt`, `roll`, `zoom` (commanded); `actualPan`, `actualTilt` (read back from the camera); `panRange`, `tiltRange`, `zoomRange`; `video` {`width`, `height`, `fps`}; `recording` | — |
+| `state` | `pan`, `tilt`, `roll`, `zoom` (commanded); `actualPan`, `actualTilt` (read back from the camera); `panRange`, `tiltRange`, `zoomRange`; `video` {`width`, `height`, `fps`}; `recording`; `fov` [horizontal, vertical] degrees at zoom 100, only when the camera is not a Pocket 3 (StackChan) | — |
 
 `state` arrives every 0.2 s while subscribed. All timestamps share the host clock, so video and audio `pts` can be compared directly.
 
@@ -87,7 +87,7 @@ Each part is optional: `null`, `false` or a missing key unsubscribes, and `true`
 ```
 - **Direction:** +pan turns right and +tilt turns up. Both were measured on a Pocket 3 in landscape.
 - **Speed:** the gimbal moves at roughly 8°/s. For closed-loop control, such as following a subject, wait until `actualPan`/`actualTilt` reach `pan`/`tilt` before acting on the next frame. A frame taken mid-move shows an error that is already being corrected, and correcting it again overshoots. [`FaceFollow.swift`](swift/FaceFollow.swift) does this.
-- **Field of view:** about 95° × 53° at zoom 100 in 16:9, divided by zoom/100.
+- **Field of view:** about 95° × 53° at zoom 100 in 16:9, divided by zoom/100. Other cameras report theirs in `state.fov`.
 - **Zoom** changes glide smoothly to the target.
 
 ### `record`, `snapshot`

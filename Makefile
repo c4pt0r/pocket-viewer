@@ -41,10 +41,10 @@ pocketctl: pocketctl.c gimbal.c gimbal.h
 	clang $(CFLAGS) -o $@ pocketctl.c gimbal.c $(IOKIT)
 
 pocket-viewer: pocket-viewer.m gimbal.c gimbal.h echocancel.m echocancel.h moviewriter.m moviewriter.h \
-		plugins.m plugins.h Info.plist
-	clang $(CFLAGS) -fobjc-arc -o $@ pocket-viewer.m echocancel.m moviewriter.m plugins.m gimbal.c $(IOKIT) \
+		plugins.m plugins.h stackchan.m stackchan.h Info.plist
+	clang $(CFLAGS) -fobjc-arc -o $@ pocket-viewer.m echocancel.m moviewriter.m plugins.m stackchan.m gimbal.c $(IOKIT) \
 		-framework Cocoa -framework AVFoundation -framework CoreMedia -framework QuartzCore \
-		-framework CoreAudio -framework AudioToolbox -framework CoreImage \
+		-framework CoreAudio -framework AudioToolbox -framework CoreImage -framework ImageIO \
 		-sectcreate __TEXT __info_plist Info.plist
 
 # The voice agent (Node + the pi SDK); needs network for npm install.
