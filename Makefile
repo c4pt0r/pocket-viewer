@@ -1,11 +1,26 @@
+# pocket-viewer itself is a Rust program (cargo); everything else here is
+# optional. The Swift plugins and pocketctl are macOS-only.
+UNAME := $(shell uname -s)
 CFLAGS = -O2 -Wall
 IOKIT = -framework IOKit -framework CoreFoundation
+ifeq ($(OS),Windows_NT)
+EXE = .exe
+endif
 
-all: pocketctl pocket-viewer plugins
+ifeq ($(UNAME),Darwin)
+all: pocket-viewer pocketctl plugins
+else
+all: pocket-viewer
+endif
+
+# Cargo decides what to rebuild; the copy keeps ./pocket-viewer working as before.
+pocket-viewer:
+	cargo build --release
+	cp target/release/pocket-viewer$(EXE) ./pocket-viewer$(EXE)
 
 SWIFTC = swiftc -O -parse-as-library
 plugins: plugins/bin/face-follow plugins/bin/tracker plugins/bin/gestures plugins/bin/interpreter \
-	plugins/bin/voice-control plugins/bin/transcribe
+	plugins/bin/voice-control plugins/bin/transcribe plugins/bin/calibrate
 
 SDK = plugins/swift/PocketViewer.swift
 FOLLOW = $(SDK) plugins/swift/Follow.swift
@@ -25,6 +40,10 @@ plugins/bin/gestures: $(FOLLOW) plugins/swift/Gestures.swift
 	@mkdir -p plugins/bin
 	$(SWIFTC) -o $@ $^
 
+plugins/bin/calibrate: $(SDK) plugins/swift/Calibrate.swift
+	@mkdir -p plugins/bin
+	$(SWIFTC) -o $@ $^
+
 plugins/bin/interpreter: $(SPEECH) plugins/swift/Interpreter.swift plugins/swift/Interpreter-Info.plist
 	@mkdir -p plugins/bin
 	$(SWIFTC) -o $@ $(SPEECH) plugins/swift/Interpreter.swift $(call plist,plugins/swift/Interpreter-Info.plist)
@@ -40,13 +59,6 @@ plugins/bin/transcribe: $(SPEECH) plugins/swift/Transcribe.swift plugins/swift/T
 pocketctl: pocketctl.c gimbal.c gimbal.h
 	clang $(CFLAGS) -o $@ pocketctl.c gimbal.c $(IOKIT)
 
-pocket-viewer: pocket-viewer.m gimbal.c gimbal.h echocancel.m echocancel.h moviewriter.m moviewriter.h \
-		plugins.m plugins.h stackchan.m stackchan.h Info.plist
-	clang $(CFLAGS) -fobjc-arc -o $@ pocket-viewer.m echocancel.m moviewriter.m plugins.m stackchan.m gimbal.c $(IOKIT) \
-		-framework Cocoa -framework AVFoundation -framework CoreMedia -framework QuartzCore \
-		-framework CoreAudio -framework AudioToolbox -framework CoreImage -framework ImageIO \
-		-sectcreate __TEXT __info_plist Info.plist
-
 # The voice agent (Node + the pi SDK); needs network for npm install.
 ai-agent: plugins/bin/transcribe plugins/node/ai-agent/node_modules
 
@@ -54,7 +66,8 @@ plugins/node/ai-agent/node_modules: plugins/node/ai-agent/package.json plugins/n
 	cd plugins/node/ai-agent && npm ci --no-audit --no-fund
 	@touch $@
 
-.PHONY: all plugins ai-agent clean
+.PHONY: all pocket-viewer plugins ai-agent clean
 
 clean:
+	cargo clean
 	rm -rf pocketctl pocket-viewer plugins/bin plugins/node/ai-agent/node_modules

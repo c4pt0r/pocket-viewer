@@ -30,9 +30,6 @@
 
 static IOUSBDeviceInterface **dev;
 static gimbal_range rng;
-static const gimbal_backend *backend;
-
-void gimbal_set_backend(const gimbal_backend *b) { backend = b; }
 
 static int ctrl(int request, int selector, void *data, int len) {
   IOUSBDevRequest r = {
@@ -69,20 +66,12 @@ static int zoom(int request, int *out) {
 }
 
 int gimbal_open(gimbal_range *range) {
-  if (backend) {
-    if (backend->open(&rng)) return -1;
-    if (range) *range = rng;
-    return 0;
-  }
   CFMutableDictionaryRef m = IOServiceMatching(kIOUSBDeviceClassName);
   int vid = VID, pid = PID;
   CFDictionarySetValue(m, CFSTR(kUSBVendorID), CFNumberCreate(NULL, kCFNumberIntType, &vid));
   CFDictionarySetValue(m, CFSTR(kUSBProductID), CFNumberCreate(NULL, kCFNumberIntType, &pid));
   io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, m);
-  if (!svc) {
-    fprintf(stderr, "DJI Pocket 3 not found (is it in webcam mode?)\n");
-    return -1;
-  }
+  if (!svc) return -1;  // not plugged in, or not in webcam mode
   IOCFPlugInInterface **plugin;
   SInt32 score;
   kern_return_t kr = IOCreatePlugInInterfaceForService(svc, kIOUSBDeviceUserClientTypeID,
@@ -105,35 +94,25 @@ int gimbal_open(gimbal_range *range) {
 }
 
 int gimbal_get(double *pan, double *tilt) {
-  return backend ? backend->get(pan, tilt) : pantilt(GET_CUR, pan, tilt);
+  return pantilt(GET_CUR, pan, tilt);
 }
 
 int gimbal_set(double pan, double tilt) {
-  if (backend) return backend->set(clamp(pan, rng.pan_min, rng.pan_max), clamp(tilt, rng.tilt_min, rng.tilt_max));
   int32_t v[2] = {(int32_t)(clamp(pan, rng.pan_min, rng.pan_max) * 3600),
                   (int32_t)(clamp(tilt, rng.tilt_min, rng.tilt_max) * 3600)};
   return ctrl(SET_CUR, SEL_PANTILT, v, sizeof v);
 }
 
 int gimbal_get_zoom(int *z) {
-  if (backend) {
-    *z = 100;
-    return 0;
-  }
   return zoom(GET_CUR, z);
 }
 
 int gimbal_set_zoom(int z) {
-  if (backend) return 0;
   uint16_t v = (uint16_t)clamp(z, rng.zoom_min, rng.zoom_max);
   return ctrl(SET_CUR, SEL_ZOOM, &v, sizeof v);
 }
 
 int gimbal_get_roll(double *roll) {
-  if (backend) {
-    *roll = 0;
-    return 0;
-  }
   int16_t v;
   if (ctrl(GET_CUR, SEL_ROLL, &v, sizeof v)) return -1;
   *roll = v;
@@ -141,7 +120,6 @@ int gimbal_get_roll(double *roll) {
 }
 
 int gimbal_set_roll(double roll) {
-  if (backend) return 0;
   int16_t v = (int16_t)lround(clamp(roll, -30, 30));
   return ctrl(SET_CUR, SEL_ROLL, &v, sizeof v);
 }

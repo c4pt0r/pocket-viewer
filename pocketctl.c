@@ -84,7 +84,10 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-  if (gimbal_open(&rng)) return 1;
+  if (gimbal_open(&rng)) {
+    fprintf(stderr, "DJI Pocket 3 not found (is it in webcam mode?)\n");
+    return 1;
+  }
 
   const char *cmd = argc > 1 ? argv[1] : "interactive";
   if (!strcmp(cmd, "interactive")) {
