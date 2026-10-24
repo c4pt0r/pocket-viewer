@@ -4,7 +4,7 @@
 <dict>
   <key>CFBundleIdentifier</key><string>io.github.c4pt0r.pocket-viewer</string>
   <key>CFBundleName</key><string>pocket-viewer</string>
-  <key>NSCameraUsageDescription</key><string>Show live video from the DJI Pocket 3.</string>
-  <key>NSMicrophoneUsageDescription</key><string>Monitor audio from the DJI Pocket 3.</string>
+  <key>NSCameraUsageDescription</key><string>Show live video from the DJI Pocket 3 or another camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Record and monitor audio with the video.</string>
 </dict>
 </plist>

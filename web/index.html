@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pocket-viewer</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="stage" tabindex="0">
+  <img id="video" alt="" draggable="false">
+  <canvas id="overlay"></canvas>
+  <div id="waiting">connecting…</div>
+  <div id="hud"><div id="hud-plugins"></div><div id="hud-main"></div></div>
+  <button id="menu-button" title="Settings (right-click anywhere)" aria-label="Settings">☰</button>
+  <div id="toasts"></div>
+</div>
+
+<aside id="panel" hidden>
+  <header><h1>pocket-viewer</h1><button id="close-panel" aria-label="Close">✕</button></header>
+
+  <section>
+    <h2>Camera</h2>
+    <p id="camera-name" class="muted"></p>
+    <div class="row uvc-only">
+      <label>Resolution <select id="size"></select></label>
+      <label>Frame rate <select id="rate"></select></label>
+    </div>
+    <div class="row">
+      <label>Scaling
+        <select id="scaling">
+          <option value="fill">Fill (crop)</option>
+          <option value="fit">Fit (letterbox)</option>
+          <option value="stretch">Stretch</option>
+        </select>
+      </label>
+      <button id="fullscreen">Full screen</button>
+    </div>
+  </section>
+
+  <section id="gimbal-section">
+    <h2>Gimbal</h2>
+    <div class="gimbal">
+      <div class="pad">
+        <span></span><button data-move="0,1" aria-label="Up">▲</button><span></span>
+        <button data-move="-1,0" aria-label="Left">◀</button><button id="center" title="Center (c)">●</button><button data-move="1,0" aria-label="Right">▶</button>
+        <span></span><button data-move="0,-1" aria-label="Down">▼</button><span></span>
+      </div>
+      <div class="readout">
+        <div>pan <b id="pan">–</b> tilt <b id="tilt">–</b></div>
+        <label>Step <select id="step"><option>0.5</option><option>1</option><option>2</option><option selected>5</option><option>10</option><option>20</option><option>45</option></select>°</label>
+      </div>
+    </div>
+    <label class="slider zoom-only">Zoom <input id="zoom" type="range" min="100" max="400" step="1"><b id="zoom-value"></b></label>
+    <label class="slider roll-only">Roll <input id="roll" type="range" min="-30" max="30" step="1"><b id="roll-value"></b></label>
+    <p id="no-gimbal" class="muted" hidden>No gimbal (yet): the Pocket 3 controls appear once it is connected.</p>
+  </section>
+
+  <section>
+    <h2>Record</h2>
+    <div class="row">
+      <button id="record" class="primary">Record</button>
+      <button id="snapshot">Snapshot</button>
+    </div>
+    <div class="row">
+      <label>Video <select id="codec"><option value="hevc">HEVC</option><option value="h264">H.264</option><option value="prores">ProRes 422</option></select></label>
+      <label>Audio <select id="audio-format"><option value="aac">AAC</option><option value="pcm">PCM 24-bit</option></select></label>
+    </div>
+    <label class="wide">Folder <input id="output-dir" type="text" spellcheck="false"></label>
+  </section>
+
+  <section>
+    <h2>Audio</h2>
+    <label class="wide">Input <select id="audio-input"></select></label>
+    <div class="row">
+      <label class="check"><input id="monitor" type="checkbox"> Monitor</label>
+      <label>on <select id="audio-output"></select></label>
+    </div>
+    <div class="meter"><div id="meter-bar"></div></div>
+  </section>
+
+  <section>
+    <h2>Plugins</h2>
+    <div id="plugins"></div>
+    <div class="row">
+      <select id="catalog"></select>
+      <button id="launch-catalog">Load</button>
+    </div>
+    <div class="row">
+      <input id="command" type="text" placeholder="or a command, e.g. python3 my_plugin.py" spellcheck="false">
+      <button id="launch-command">Run</button>
+    </div>
+    <p class="muted small">Socket: <code id="socket"></code></p>
+  </section>
+
+  <section>
+    <h2>Keys</h2>
+    <dl class="keys">
+      <dt>Arrows / WASD, drag</dt><dd>pan &amp; tilt</dd>
+      <dt>[ ]</dt><dd>smaller / larger step</dd>
+      <dt>+ − / scroll</dt><dd>zoom</dd>
+      <dt>, .</dt><dd>roll</dd>
+      <dt>c</dt><dd>center</dd>
+      <dt>click, ⌥/Alt-drag, Esc</dt><dd>point / box / cancel (for plugins)</dd>
+      <dt>Space (hold)</dt><dd>push-to-talk (for plugins)</dd>
+      <dt>r</dt><dd>record</dd>
+      <dt>m</dt><dd>monitor audio</dd>
+      <dt>v</dt><dd>scaling</dd>
+      <dt>f</dt><dd>full screen</dd>
+    </dl>
+    <button id="quit" class="danger">Quit pocket-viewer</button>
+  </section>
+</aside>
+<script src="/app.js"></script>
+</body>
+</html>

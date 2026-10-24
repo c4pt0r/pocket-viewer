@@ -8,6 +8,7 @@
 // See PROTOCOL.md for the wire format.
 
 import net from "node:net";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -30,7 +31,14 @@ export interface AudioChunk {
 export type Message = Record<string, any>;
 
 export function defaultSocketPath(): string {
-  return process.env.POCKET_VIEWER_SOCKET || path.join(os.tmpdir(), "pocket-viewer.sock");
+  if (process.env.POCKET_VIEWER_SOCKET) return process.env.POCKET_VIEWER_SOCKET;
+  // On Windows pocket-viewer listens on a localhost port and writes it here.
+  if (process.platform === "win32") {
+    try {
+      return fs.readFileSync(path.join(os.tmpdir(), "pocket-viewer.port"), "utf8").trim();
+    } catch {}
+  }
+  return path.join(os.tmpdir(), "pocket-viewer.sock");
 }
 
 export class PocketViewer {
@@ -58,7 +66,9 @@ export class PocketViewer {
 
   static connect(name: string, socketPath = defaultSocketPath()): Promise<PocketViewer> {
     return new Promise((resolve, reject) => {
-      const sock = net.createConnection(socketPath);
+      // "tcp:HOST:PORT" (Windows) or a Unix socket path.
+      const tcp = socketPath.match(/^tcp:(.+):(\d+)$/);
+      const sock = tcp ? net.createConnection(Number(tcp[2]), tcp[1]) : net.createConnection(socketPath);
       sock.once("connect", () => resolve(new PocketViewer(sock, name)));
       sock.once("error", (e) => reject(new Error(`cannot connect to ${socketPath} — is pocket-viewer running? (${e.message})`)));
     });

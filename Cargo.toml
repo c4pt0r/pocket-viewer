@@ -1,0 +1,30 @@
+[package]
+name = "pocket-viewer"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Viewer, recorder and gimbal controller for the DJI Osmo Pocket 3 and M5Stack StackChan, with a web UI"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+cpal = "0.15"
+futures-util = "0.3"
+jpeg-encoder = "0.6"
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = { version = "4", default-features = false }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+webbrowser = "1"
+zune-jpeg = "0.4"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3

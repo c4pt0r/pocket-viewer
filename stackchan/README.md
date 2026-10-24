@@ -18,9 +18,9 @@ The robot runs its own firmware, [`firmware/stackchan-cam`](firmware/stackchan-c
 | Pan | −35…215° | −128…128° (+ turns right) |
 | Tilt | ±90° | 5…85° (+ up) |
 | Zoom, roll | yes | no (zoom stays 100) |
-| Field of view | ~95° × 53° | ~41° × 31°, sent to plugins as `state.fov` |
+| Field of view | ~95° × 53° | ~41° × 31°, or as measured by [calibrate](#calibration); sent to plugins as `state.fov` |
 | Moves | glide at ~8°/s | about 1 s; the servos stop 1–2° short, which counts as arrived once still |
-| Recording | movie file output | the writer (as with echo cancellation) |
+| Recording | raw frames to ffmpeg | its JPEG frames to ffmpeg, at a steady 15 fps |
 
 ## Setup
 
@@ -46,12 +46,24 @@ stackchan/restore-factory.sh ~/Documents/stackchan-factory.bin
 
 M5Burner can also install the current official firmware: search for StackChan, then choose *Burn*.
 
+## Calibration
+
+The field of view (41° × 31°) and the head's directions were measured on one robot. To measure yours:
+
+```sh
+./pocket-viewer -d stackchan -p plugins/bin/calibrate
+```
+
+Point the robot at a still scene with some texture, such as a bookshelf, and stay out of view while it runs (about a minute). It turns the head ±15° left and right and ±12° up and down from where it is, measures how far the picture moves each time (cross-correlation, to a fraction of a pixel), and works out the field of view from the angles the servos report. The HUD shows the result, and it is saved to `~/.config/pocket-viewer/stackchan.json`. pocket-viewer reads that file at once, without a restart, and sends it to plugins as `state.fov`, so face-follow and tracker aim with it. If the steps disagree by more than 15%, because someone walked through or the scene was blank, nothing is saved; try again. `--dry-run` measures without saving, and `--shots DIR` keeps each step's picture. It also reports how far short of their targets the servos stop. Delete the file to go back to the built-in values.
+
+The servos' zero points are a different calibration: they live in the robot's NVS, set by the factory firmware, and are not changed here.
+
 ## How it works
 
-- **Video.** The GC0308 camera delivers RGB565 frames. One task on the robot encodes them to JPEG, and another sends the newest JPEG over USB, so a slow link drops frames rather than adding delay. The Mac decodes each JPEG into a host-clock sample buffer. From there it goes where Pocket 3 frames go: the window, plugins, snapshots, and recordings.
+- **Video.** The GC0308 camera delivers RGB565 frames. One task on the robot encodes them to JPEG, and another sends the newest JPEG over USB, so a slow link drops frames rather than adding delay. pocket-viewer passes each JPEG on as it is: to the browser, to snapshots and recordings, and, decoded, to plugins. Frames are stamped on arrival, on the clock that audio uses too.
 - **USB.** The firmware runs the chip's USB in USB-OTG mode (TinyUSB CDC). The built-in USB-Serial-JTAG port managed only about 30 KB/s (2 fps). esptool cannot reset TinyUSB by itself, so [`bootloader-port.sh`](bootloader-port.sh) opens the port at 1200 baud. That reboots the robot into its ROM bootloader, which comes back as a different port. If it ever fails, hold RST (bottom, by the microSD slot) for 3 s until the LED turns green, then run the script again.
-- **Gimbal.** `gimbal.c` routes its calls to a backend in `stackchan.m`. Yaw and pitch map directly to pan and tilt: + turns the camera right and up, as measured against a static ceiling. M5Stack's examples call +yaw "left", meaning as seen from in front of the robot. The servos stop 1–2° short of a target, so once the head is still and within 3°, it reports the target. Otherwise face-follow, which waits for the head to arrive, would wait forever.
-- **Field of view.** Tilting 10° moved a static ceiling 77.5 of 240 pixels, so the view is 31° tall. The width, 41°, follows from the 4:3 sensor.
+- **Gimbal.** The head is a gimbal backend in `src/stackchan.rs`. Yaw and pitch map directly to pan and tilt: + turns the camera right and up, as measured against a static ceiling. M5Stack's examples call +yaw "left", meaning as seen from in front of the robot. The servos stop 1–2° short of a target, so once the head is still and within 3°, it reports the target. Otherwise face-follow, which waits for the head to arrive, would wait forever.
+- **Field of view.** Tilting 10° moved a static ceiling 77.5 of 240 pixels, so the view is 31° tall. The width, 41°, follows from the 4:3 sensor. `calibrate` measures it the same way, on both axes, with the pinhole relation shift = f·tan(angle).
 
 ## Protocol
 

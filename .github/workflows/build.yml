@@ -1,0 +1,24 @@
+# Builds and tests pocket-viewer on Linux, Windows and macOS, and keeps each
+# binary as a downloadable artifact.
+name: build
+on: [push, pull_request]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries (ALSA, V4L2 headers for bindgen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libclang-dev pkg-config
+      - run: cargo test --release
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pocket-viewer-${{ runner.os }}
+          path: target/release/pocket-viewer${{ runner.os == 'Windows' && '.exe' || '' }}

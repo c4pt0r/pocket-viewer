@@ -1,9 +1,9 @@
 # pocket-viewer plugin protocol (v1)
 
-A plugin is any program that connects to pocket-viewer's Unix socket. It can subscribe to the camera's video frames, the audio, the gimbal state and the user's clicks on the video. It can send back drawing commands, shown over the video, status text for the HUD, gimbal commands, and recording and snapshot commands.
+A plugin is any program that connects to pocket-viewer's plugin socket. It can subscribe to the camera's video frames, the audio, the gimbal state and the user's clicks on the video. It can send back drawing commands, shown over the video, status text for the HUD, gimbal commands, and recording and snapshot commands.
 
-- **Socket:** `$POCKET_VIEWER_SOCKET` when pocket-viewer launched the plugin. Otherwise use `$TMPDIR/pocket-viewer.sock`, the per-user temporary directory (Python: `tempfile.gettempdir()`). Only the current user can connect.
-- **Launching:** use *Plugins → Load Plugin…* (right-click or the menu bar), or `pocket-viewer -p "command"` (repeatable). The command runs via `/bin/sh -c` with `POCKET_VIEWER_SOCKET` and `POCKET_VIEWER_TOKEN` set. Plugins started any other way connect as *external* clients.
+- **Socket:** `$POCKET_VIEWER_SOCKET` when pocket-viewer launched the plugin. Otherwise use `$TMPDIR/pocket-viewer.sock`, the per-user temporary directory (Python: `tempfile.gettempdir()`). Only the current user can connect. On Windows it is a localhost TCP port instead: the address is `tcp:127.0.0.1:PORT`, also written to `%TEMP%\pocket-viewer.port`. The SDKs handle both.
+- **Launching:** use the *Plugins* section of the settings panel (right-click the video), or `pocket-viewer -p "command"` (repeatable). The command runs via `/bin/sh -c` (`cmd /C` on Windows) with `POCKET_VIEWER_SOCKET` and `POCKET_VIEWER_TOKEN` set. Plugins started any other way connect as *external* clients.
 - **SDKs:** [`python/pocketviewer.py`](python/pocketviewer.py) (standard library only), [`swift/PocketViewer.swift`](swift/PocketViewer.swift) and [`node/pocketviewer.ts`](node/pocketviewer.ts) (Node 22.18+, no dependencies).
 
 ## Framing
@@ -27,7 +27,7 @@ pocket-viewer validates everything it receives. Malformed input, unknown types a
 | `audio` | `pts`, `rate`, `channels`, `frames`, `format` (`s16le`) | interleaved signed 16-bit little-endian samples |
 | `set` | `key`, `value` | — the user changed a setting declared with `options` |
 | `input` | `event`: `click` (`x`, `y`), `select` (`x`, `y`, `w`, `h`) or `cancel` | — see below |
-| `state` | `pan`, `tilt`, `roll`, `zoom` (commanded); `actualPan`, `actualTilt` (read back from the camera); `panRange`, `tiltRange`, `zoomRange`; `video` {`width`, `height`, `fps`}; `recording`; `fov` [horizontal, vertical] degrees at zoom 100, only when the camera is not a Pocket 3 (StackChan) | — |
+| `state` | `pan`, `tilt`, `roll`, `zoom` (commanded); `actualPan`, `actualTilt` (read back from the camera); `panRange`, `tiltRange`, `zoomRange`; `video` {`width`, `height`, `fps`}; `recording`; `fov` [horizontal, vertical] degrees at zoom 100, only when the camera is not a Pocket 3 (StackChan); `head` {`yaw`, `pitch`, `moving`}, StackChan only: the head exactly as the robot reports it (`actualPan`/`actualTilt` round a still head to its target) | — |
 
 `state` arrives every 0.2 s while subscribed. All timestamps share the host clock, so video and audio `pts` can be compared directly.
 
@@ -36,7 +36,7 @@ pocket-viewer validates everything it receives. Malformed input, unknown types a
 ## plugin → pocket-viewer
 
 ### `hello`
-`{"type": "hello", "name": "face-follow", "token": "$POCKET_VIEWER_TOKEN"}` names the plugin in the Plugins menu. The token ties the connection to the process pocket-viewer launched.
+`{"type": "hello", "name": "face-follow", "token": "$POCKET_VIEWER_TOKEN"}` names the plugin in the settings panel. The token ties the connection to the process pocket-viewer launched.
 
 ### `subscribe`
 ```json
@@ -95,10 +95,10 @@ Each part is optional: `null`, `false` or a missing key unsubscribes, and `true`
 {"type": "record", "action": "start"}           // "start", "stop" or "toggle"
 {"type": "snapshot"}
 ```
-- **Recording** uses the settings in the Record menu. `start` while recording and `stop` while stopped do nothing; `state.recording` tells which it is.
+- **Recording** uses the settings in the panel's Record section. `start` while recording and `stop` while stopped do nothing; `state.recording` tells which it is.
 - **Snapshots** save the next camera frame at full resolution as a JPEG in the recordings folder.
 
-### `options` (settings in the Plugins menu)
+### `options` (settings in the panel)
 ```json
 {"type": "options", "items": [
   {"key": "follow", "title": "Move the gimbal to follow", "type": "bool", "value": true},
@@ -106,7 +106,7 @@ Each part is optional: `null`, `false` or a missing key unsubscribes, and `true`
    "choices": [["English", "English"], ["Japanese", "日本語"]]}
 ]}
 ```
-- **Menu:** the items appear under *Plugins → (plugin name)*, in the right-click menu and the menu bar. A `bool` is a checkmark item; a `choice` is a submenu of `[value, label]` pairs, where `value` is a string or a number.
+- **Panel:** the items appear under the plugin's name in the settings panel's *Plugins* section. A `bool` is a checkbox; a `choice` is a drop-down of `[value, label]` pairs, where `value` is a string or a number.
 - **Changes:** when the user changes a setting, pocket-viewer sends `{"type": "set", "key": …, "value": …}`. Apply it, then send `options` again with the new values.
 - **Saved values:** pocket-viewer remembers choices per plugin name. When a plugin first declares its options with different values, pocket-viewer sends `set` for each saved value that is still valid. A plugin may re-exec itself to apply a setting, as `interpreter` does; it keeps its identity through `POCKET_VIEWER_TOKEN`.
 
@@ -121,6 +121,7 @@ Each part is optional: `null`, `false` or a missing key unsubscribes, and `true`
 | [`swift/FaceFollow.swift`](swift/FaceFollow.swift) → `plugins/bin/face-follow` | Detects faces with Apple Vision, boxes them, and keeps the largest one framed. Pass `--no-follow` to only draw, or `--verbose` to log each move. |
 | [`node/ai-agent/ai-agent.ts`](node/ai-agent/ai-agent.ts) | A voice agent on the pi SDK with OpenAI models. It listens through `transcribe`, answers in subtitles and speech, and has tools to `look` at the current frame(s), review `recent_keyframes`, turn and zoom the camera, record and take snapshots. `make ai-agent` installs its npm dependencies. |
 | [`swift/Transcribe.swift`](swift/Transcribe.swift) → `plugins/bin/transcribe` | Not a plugin: a helper for plugins in any language. It reads 16 kHz mono s16le on stdin and writes `{"partial"}` / `{"phrase"}` JSON lines, using Apple Speech on-device. |
+| [`swift/Calibrate.swift`](swift/Calibrate.swift) → `plugins/bin/calibrate` | StackChan only. Turns the head by known angles, measures how far the picture moves, and saves the camera's field of view to `~/.config/pocket-viewer/stackchan.json`, which pocket-viewer then sends as `state.fov`. `--pan 15 --tilt 12 --rounds 2`, `--dry-run`, `--shots DIR` to keep each step's picture. |
 | [`swift/Tracker.swift`](swift/Tracker.swift) → `plugins/bin/tracker` | Click something in the video, or ⌥-drag a box around it, and the gimbal keeps it centered (Apple Vision object tracking). Esc stops. |
 | [`swift/Gestures.swift`](swift/Gestures.swift) → `plugins/bin/gestures` | Teaching example, not meant for everyday use. Hand gestures (Apple Vision hand pose): hold ✋ to start or stop recording, ✌️ for a snapshot, point ☝️ to turn the gimbal, 👍 / 👎 to zoom. |
 | [`swift/VoiceControl.swift`](swift/VoiceControl.swift) → `plugins/bin/voice-control` | Spoken commands, recognized on-device: 左转 / 右转 [30度], 抬头 / 低头, 放大 / 缩小 [到2倍], 回中, 开始录像 / 停止录像, 拍照, or the English equivalents ("turn left 30 degrees", "zoom in", "take a photo"). `--lang zh-CN\|en-US`; `--wake 相机` acts only on words after the wake word. |

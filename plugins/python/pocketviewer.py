@@ -21,7 +21,14 @@ from dataclasses import dataclass
 
 
 def default_socket_path():
-    return os.environ.get("POCKET_VIEWER_SOCKET") or os.path.join(tempfile.gettempdir(), "pocket-viewer.sock")
+    if os.environ.get("POCKET_VIEWER_SOCKET"):
+        return os.environ["POCKET_VIEWER_SOCKET"]
+    # On Windows pocket-viewer listens on a localhost port and writes it here.
+    port_file = os.path.join(tempfile.gettempdir(), "pocket-viewer.port")
+    if os.name == "nt" and os.path.exists(port_file):
+        with open(port_file) as f:
+            return f.read().strip()
+    return os.path.join(tempfile.gettempdir(), "pocket-viewer.sock")
 
 
 @dataclass
@@ -47,8 +54,13 @@ class Plugin:
 
     def __init__(self, name, socket_path=None):
         self.name = name
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(socket_path or default_socket_path())
+        address = socket_path or default_socket_path()
+        if address.startswith("tcp:"):  # "tcp:HOST:PORT", on Windows
+            host, port = address[4:].rsplit(":", 1)
+            self.sock = socket.create_connection((host, int(port)))
+        else:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(address)
         self._send_lock = threading.Lock()
         self.hello = {}
         self.state = {}
