@@ -39,6 +39,9 @@ pub struct Link {
     tx: (Mutex<Tx>, Condvar),
 }
 
+/// How fast pictures for the screen go down; see run_tx.
+const PICTURE_BYTES_PER_SEC: f64 = 60_000.0;
+
 /// What waits to go down to the robot. One thread writes it all, so the reader
 /// never waits on a write: a write can block while the robot is busy sending,
 /// and the robot gets to read only once we have read what it sends.
@@ -110,8 +113,12 @@ impl Link {
     }
 
     /// The tx thread: commands first, then the newest picture, and "stream" every second.
+    /// Pictures are paced to PICTURE_BYTES_PER_SEC: the robot's USB stack takes
+    /// in bytes one at a time, and faster than about 100 KB/s it starves core 0
+    /// until the task watchdog restarts the chip.
     fn run_tx(&self) {
         let mut last_stream = Instant::now() - Duration::from_secs(1);
+        let mut next_picture = Instant::now();
         loop {
             let (data, picture) = {
                 let mut tx = self.tx.0.lock().unwrap();
@@ -119,15 +126,17 @@ impl Link {
                     if let Some(line) = tx.lines.pop_front() {
                         break (line.into_bytes(), None);
                     }
-                    if let Some(p) = tx.picture.take() {
-                        break (Vec::new(), Some(p));
+                    let picture_due = next_picture.saturating_duration_since(Instant::now());
+                    if tx.picture.is_some() && picture_due.is_zero() {
+                        break (Vec::new(), tx.picture.take());
                     }
                     let due = Duration::from_secs(1).saturating_sub(last_stream.elapsed());
                     if due.is_zero() {
                         last_stream = Instant::now();
                         break (b"stream\n".to_vec(), None);
                     }
-                    tx = self.tx.1.wait_timeout(tx, due).unwrap().0;
+                    let wait = if tx.picture.is_some() { due.min(picture_due) } else { due };
+                    tx = self.tx.1.wait_timeout(tx, wait).unwrap().0;
                 }
             };
             let data = match picture {
@@ -138,7 +147,8 @@ impl Link {
                     // Re-encoded here so the robot always gets a baseline JPEG
                     // of its screen's size, whatever the browser sent.
                     let Some((sw, sh, rgb)) = decode_jpeg(&jpeg) else { continue };
-                    let Some(out) = encode_jpeg(&cover_rgb(&rgb, sw, sh, w, h), w, h, 70) else { continue };
+                    let Some(out) = encode_jpeg(&cover_rgb(&rgb, sw, sh, w, h), w, h, 60) else { continue };
+                    next_picture = Instant::now() + Duration::from_secs_f64(out.len() as f64 / PICTURE_BYTES_PER_SEC);
                     // The newline first: if the robot ever lost bytes of a picture
                     // (its USB queue overflowed), it is back in step at the next one.
                     let mut packet = format!("\nshow {}\n", out.len()).into_bytes();
@@ -241,7 +251,11 @@ impl Link {
                     b'J' => latest = Some(Bytes::copy_from_slice(payload)),
                     b'S' => {
                         if let Ok(v @ Value::Object(_)) = serde_json::from_slice::<Value>(payload) {
-                            *self.state.lock().unwrap() = Some(v);
+                            let mut st = self.state.lock().unwrap();
+                            if st.is_none() {
+                                log_restart(&v);
+                            }
+                            *st = Some(v);
                         }
                     }
                     _ => {}
@@ -267,6 +281,38 @@ impl Link {
         let st = self.state()?;
         Some(json!({"yaw": st.get("yaw")?.as_f64()?, "pitch": st.get("pitch")?.as_f64()?,
                     "moving": st.get("moving").and_then(Value::as_bool).unwrap_or(false)}))
+    }
+}
+
+/// Logs the firmware and why the robot last restarted (stackchan-cam reports
+/// esp_reset_reason as "reset"), so a robot that keeps rebooting says why.
+fn log_restart(st: &Value) {
+    let version = st.get("version").and_then(Value::as_str).unwrap_or("?");
+    let Some(reset) = st.get("reset").and_then(Value::as_u64) else {
+        crate::log!("StackChan: {version}");
+        return;
+    };
+    let why = match reset {
+        1 => "power on",
+        2 => "reset pin",
+        3 => "software",
+        4 => "crash (panic)",
+        5 => "interrupt watchdog",
+        6 => "task watchdog",
+        7 => "watchdog",
+        9 => "brownout (power dipped)",
+        11 => "USB",
+        12 => "JTAG",
+        14 => "power glitch",
+        15 => "CPU lockup",
+        _ => "unknown",
+    };
+    match st.get("wdtTask").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+        Some(task) => {
+            let cpu = st.get("wdtCpu").and_then(Value::as_str).unwrap_or("");
+            crate::log!("StackChan: {version}, last restart: {why} ({reset}), core 0 was running {task}; busiest tasks (% of a core): {cpu}")
+        }
+        None => crate::log!("StackChan: {version}, last restart: {why} ({reset})"),
     }
 }
 

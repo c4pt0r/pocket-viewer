@@ -6,7 +6,11 @@
 //   "SCF1" type:u8 length:u32le payload
 //     'J'  a JPEG frame
 //     'S'  head state, JSON: {"yaw","pitch","moving","yawRange","pitchRange",
-//          "width","height","fps","camera","screen","version"}, every 0.2 s
+//          "width","height","fps","camera","screen","version","reset","wdtTask",
+//          "wdtCpu","cpu"}, every 0.2 s. "reset" is why the chip last restarted
+//          (esp_reset_reason); after a task watchdog, "wdtTask" is what core 0
+//          was running and "wdtCpu" the busiest tasks then; "cpu" is the busiest
+//          tasks over the last second, "name percent-of-a-core, …"
 // Down, text lines:
 //   stream                  start or keep streaming; re-send at least every 3 s
 //   move YAW PITCH [SPEED]  absolute degrees: yaw −128…128, + turns the camera
@@ -167,6 +171,50 @@ static volatile uint32_t show_seq;
 static volatile uint32_t show_last_ms;  // when the last picture arrived
 static volatile bool show_off;          // "show off": back to the status now
 static int screen_width, screen_height;
+static int reset_reason;  // esp_reset_reason() at boot
+// The busiest tasks over the last second, as "name percent ..." of one core.
+static char cpu_report[96];
+
+static void measure_cpu() {
+  static uint32_t last_ms, prev_total;
+  static TaskHandle_t prev_task[32];
+  static uint32_t prev_time[32];
+  static int prev_n;
+  if (millis() - last_ms < 1000) return;
+  last_ms = millis();
+  static TaskStatus_t st[32];
+  uint32_t total;
+  int n = uxTaskGetSystemState(st, 32, &total);
+  uint32_t dt = total - prev_total;
+  struct { const char *name; uint32_t d; } use[32];
+  for (int i = 0; i < n; i++) {
+    uint32_t before = st[i].ulRunTimeCounter;
+    for (int j = 0; j < prev_n; j++)
+      if (prev_task[j] == st[i].xHandle) before = prev_time[j];
+    use[i] = {st[i].pcTaskName, st[i].ulRunTimeCounter - before};
+  }
+  std::sort(use, use + n, [](auto &a, auto &b) { return a.d > b.d; });
+  char out[sizeof cpu_report];
+  size_t len = 0;
+  out[0] = 0;
+  for (int i = 0; i < n && i < 6 && dt; i++)
+    len += snprintf(out + len, sizeof out - len, "%s%s %u", i ? ", " : "", use[i].name,
+                    (unsigned)(100ull * use[i].d / dt));
+  strlcpy(cpu_report, out, sizeof cpu_report);
+  for (int i = 0; i < n; i++) prev_task[i] = st[i].xHandle, prev_time[i] = st[i].ulRunTimeCounter;
+  prev_n = n;
+  prev_total = total;
+}
+
+// When the task watchdog fires: what core 0 was running, and the last second's
+// busiest tasks. Kept in RTC memory, which survives the restart.
+RTC_NOINIT_ATTR static char wdt_task[16];
+RTC_NOINIT_ATTR static char wdt_cpu[96];
+extern "C" void esp_task_wdt_isr_user_handler(void) {
+  TaskHandle_t t = xTaskGetCurrentTaskHandleForCore(0);
+  strlcpy(wdt_task, t ? pcTaskGetName(t) : "?", sizeof wdt_task);
+  memcpy(wdt_cpu, cpu_report, sizeof wdt_cpu);
+}
 
 // From the USB task: the receiving buffer holds a whole picture of len bytes.
 static void picture_received(size_t len) {
@@ -186,10 +234,10 @@ static void format_state(char *json, size_t size) {
   bool moving = M5StackChan.Motion.isMoving();
   snprintf(json, size,
            "{\"yaw\":%.1f,\"pitch\":%.1f,\"moving\":%s,\"yawRange\":[%d,%d],\"pitchRange\":[%d,%d],"
-           "\"width\":%d,\"height\":%d,\"fps\":%.1f,\"camera\":%s,\"screen\":[%d,%d],\"version\":\"%s\"}",
+           "\"width\":%d,\"height\":%d,\"fps\":%.1f,\"camera\":%s,\"screen\":[%d,%d],\"version\":\"%s\",\"reset\":%d,\"wdtTask\":\"%s\",\"wdtCpu\":\"%s\",\"cpu\":\"%s\"}",
            angles.x / 10.0, angles.y / 10.0, moving ? "true" : "false", -kYawLimit / 10, kYawLimit / 10,
            kPitchMin / 10, kPitchMax / 10, frame_width, frame_height, measured_fps,
-           camera_ok ? "true" : "false", screen_width, screen_height, kVersion);
+           camera_ok ? "true" : "false", screen_width, screen_height, kVersion, reset_reason, wdt_task, wdt_cpu, cpu_report);
 }
 
 // "move YAW PITCH [SPEED]" or "home". Yaw + turns the camera right: M5Stack's
@@ -263,15 +311,18 @@ static void usb_task(void *) {
     bool ok = true;
     if (millis() - last_state >= 200) {
       last_state = millis();
-      char json[256];
+      char json[512];
       format_state(json, sizeof json);
       ok = send_packet('S', json, strlen(json));
     }
     size_t len = ok ? take_jpeg(&seq, &buf, &cap) : 0;
+    // Block now and then even while a picture streams in: this task outranks
+    // core 0's idle task, and starving that for 5 s trips the task watchdog,
+    // which restarts the chip.
     if (len)
       ok = send_packet('J', buf, len);
-    else if (ok && n <= 0)
-      vTaskDelay(pdMS_TO_TICKS(2));
+    else if (ok)
+      vTaskDelay(pdMS_TO_TICKS(n <= 0 ? 2 : 1));
     if (!ok || millis() - last_stream_cmd > 3000) streaming = false;  // Mac gone: wait until it asks again
   }
 }
@@ -319,6 +370,9 @@ static void show_picture() {
 // ---------------------------------------------------------------- main
 
 void setup() {
+  reset_reason = esp_reset_reason();
+  if (reset_reason != ESP_RST_TASK_WDT) wdt_task[0] = wdt_cpu[0] = 0;
+  wdt_task[sizeof wdt_task - 1] = wdt_cpu[sizeof wdt_cpu - 1] = 0;
   esp_log_level_set("*", ESP_LOG_NONE);  // logs would share the USB port with the video
   Serial.setTxTimeoutMs(200);
   Serial.setRxBufferSize(16384);  // a picture arrives faster than 64-byte reads keep up with
@@ -341,5 +395,6 @@ void loop() {
   M5StackChan.update();
   show_picture();
   show_status();
+  measure_cpu();
   delay(20);
 }

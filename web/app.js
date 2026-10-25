@@ -289,7 +289,7 @@ function renderShare() {
     !secure ? "The browser allows the camera only on https or localhost: start pocket-viewer with --tls, then open its https:// address."
     : !c.connected ? "Waiting for the StackChan."
     : !c.screen ? "The robot's firmware cannot show pictures: update it with stackchan/flash.sh."
-    : share ? `On the robot's ${c.screen[0]}×${c.screen[1]} screen, about 10 pictures a second. Only one camera at a time: the latest to start wins.`
+    : share ? `On the robot's ${c.screen[0]}×${c.screen[1]} screen, several pictures a second. Only one camera at a time: the latest to start wins.`
     : "Off. Your camera is used only while this is on.";
 }
 

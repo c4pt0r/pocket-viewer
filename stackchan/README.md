@@ -83,5 +83,5 @@ The robot is a serial port (`/dev/cu.usbmodem…` on macOS, `/dev/ttyACM…` on 
 
 | | |
 |---|---|
-| up | packets: `SCF1`, a type byte, a little-endian u32 length, the payload. `J` is a JPEG frame. `S` is the head state as JSON, every 0.2 s: `yaw`, `pitch`, `moving`, `yawRange`, `pitchRange`, `width`, `height`, `fps`, `camera`, `screen` (its size, `[320, 240]`; version 2), `version` |
+| up | packets: `SCF1`, a type byte, a little-endian u32 length, the payload. `J` is a JPEG frame. `S` is the head state as JSON, every 0.2 s: `yaw`, `pitch`, `moving`, `yawRange`, `pitchRange`, `width`, `height`, `fps`, `camera`, `screen` (its size, `[320, 240]`; version 2), `version`, `reset` (why the robot last restarted, from `esp_reset_reason`; pocket-viewer logs it on connecting), `wdtTask`, `wdtCpu` and `cpu` (the busiest tasks, to tell what tripped a watchdog restart) |
 | down | text lines: `stream` (start; re-send at least every 3 s), `move YAW PITCH [SPEED]` (degrees; speed 0…1000), `home`, and from version 2 `show LENGTH` followed by that many bytes of baseline JPEG for the screen (at most 64 KB; send an empty line before it, so a robot that dropped bytes gets back in step), or `show off`. With no picture for 3 s the screen goes back to the status |
