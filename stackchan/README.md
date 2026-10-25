@@ -36,7 +36,7 @@ make
 
 The backup holds the factory firmware's saved Wi-Fi passwords and account data. Keep it private, and out of this repository.
 
-The first `flash.sh` installs the pinned ESP32 core and libraries ([`build-firmware.sh`](build-firmware.sh)) into `stackchan/firmware/.arduino`. That is about 1.7 GB to download and 6 GB on disk, because the ESP32 core ships compilers for every ESP32 chip. It stays inside the repository and leaves any global Arduino setup alone; delete the folder to reclaim the space. Flashing leaves NVS alone, so the servo calibration survives. Once running stackchan-cam, the robot's screen says *waiting for the Mac (USB)*, then *streaming to the Mac* while pocket-viewer runs.
+The first `flash.sh` installs the pinned ESP32 core and libraries ([`build-firmware.sh`](build-firmware.sh)) into `stackchan/firmware/.arduino`. That is about 1.7 GB to download and 6 GB on disk, because the ESP32 core ships compilers for every ESP32 chip. It stays inside the repository and leaves any global Arduino setup alone; delete the folder to reclaim the space. Arduino's `ctags` for macOS is Intel-only, so on Apple silicon without Rosetta the script builds the same version from source (needs the Xcode command-line tools). Flashing leaves NVS alone, so the servo calibration survives. Once running stackchan-cam, the robot's screen says *waiting for the Mac (USB)*, then *streaming to the Mac* while pocket-viewer runs.
 
 To go back to the factory firmware:
 
@@ -58,6 +58,18 @@ Point the robot at a still scene with some texture, such as a bookshelf, and sta
 
 The servos' zero points are a different calibration: they live in the robot's NVS, set by the factory firmware, and are not changed here.
 
+## Your camera on its screen
+
+Someone viewing pocket-viewer's page can put their own camera on the robot's screen, live, so the robot shows who is talking through it. It is off until a viewer turns it on: in the settings panel (right-click, or ☰), under *StackChan screen*, tick *Show my camera on the robot's screen*, and allow the camera when the browser asks. A small view of what is being sent appears in the top-left corner. Untick it, or close the page, and the robot goes back to its status screen.
+
+Browsers allow the camera only on https or on localhost. From another machine, start pocket-viewer with `--host 0.0.0.0 --tls` and open `https://<this Mac's address>:8642/`. The certificate is self-signed, so the browser warns the first time; accept it to go on. Anyone who can open the page can also steer the robot and see through it: there is no password.
+
+```sh
+./pocket-viewer -d stackchan --host 0.0.0.0 --tls
+```
+
+This needs firmware version 2 (`stackchan-cam 2`). With older firmware, the panel says to update it: run `stackchan/flash.sh` again. The browser sends about 10 pictures a second, cropped to fill the 320×240 screen. pocket-viewer re-encodes each one as a baseline JPEG, which is what the robot's decoder takes, and sends the newest one whenever the link is free. One camera is shown at a time: when a second viewer turns it on, the first one's turns off.
+
 ## How it works
 
 - **Video.** The GC0308 camera delivers RGB565 frames. One task on the robot encodes them to JPEG, and another sends the newest JPEG over USB, so a slow link drops frames rather than adding delay. pocket-viewer passes each JPEG on as it is: to the browser, to snapshots and recordings, and, decoded, to plugins. Frames are stamped on arrival, on the clock that audio uses too.
@@ -71,5 +83,5 @@ The robot is a serial port (`/dev/cu.usbmodem…`, Espressif's USB vendor ID 0x3
 
 | | |
 |---|---|
-| up | packets: `SCF1`, a type byte, a little-endian u32 length, the payload. `J` is a JPEG frame. `S` is the head state as JSON, every 0.2 s: `yaw`, `pitch`, `moving`, `yawRange`, `pitchRange`, `width`, `height`, `fps`, `camera`, `version` |
-| down | text lines: `stream` (start; re-send at least every 3 s), `move YAW PITCH [SPEED]` (degrees; speed 0…1000), `home` |
+| up | packets: `SCF1`, a type byte, a little-endian u32 length, the payload. `J` is a JPEG frame. `S` is the head state as JSON, every 0.2 s: `yaw`, `pitch`, `moving`, `yawRange`, `pitchRange`, `width`, `height`, `fps`, `camera`, `screen` (its size, `[320, 240]`; version 2), `version` |
+| down | text lines: `stream` (start; re-send at least every 3 s), `move YAW PITCH [SPEED]` (degrees; speed 0…1000), `home`, and from version 2 `show LENGTH` followed by that many bytes of baseline JPEG for the screen (at most 64 KB; send an empty line before it, so a robot that dropped bytes gets back in step), or `show off`. With no picture for 3 s the screen goes back to the status |

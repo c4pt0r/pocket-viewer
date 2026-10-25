@@ -3,6 +3,7 @@
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,9 +83,16 @@ fn devices(app: &App) -> String {
 }
 
 async fn session(app: Arc<App>, socket: WebSocket) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    session_loop(&app, socket, id).await;
+    app.screen_stop(id);
+}
+
+async fn session_loop(app: &Arc<App>, socket: WebSocket, id: u64) {
     let (mut tx, mut rx) = socket.split();
     let mut events = app.events.subscribe();
-    let first = [app.status().to_string(), app.overlay_message(), devices(&app)];
+    let first = [json!({"type": "session", "id": id}).to_string(), app.status().to_string(), app.overlay_message(), devices(app)];
     for m in first {
         if tx.send(Message::Text(m.into())).await.is_err() {
             return;
@@ -105,10 +113,20 @@ async fn session(app: Arc<App>, socket: WebSocket) {
                     if m["cmd"] == "devices" {
                         let a = app.clone();
                         tokio::task::spawn_blocking(move || devices(&a)).await.unwrap_or_default()
+                    } else if m["cmd"] == "screenStop" {
+                        app.screen_stop(id);
+                        continue;
                     } else {
                         app.command(&m);
                         continue;
                     }
+                }
+                // A binary message is a JPEG from this browser's camera, for the StackChan's screen.
+                Some(Ok(Message::Binary(jpeg))) => {
+                    if jpeg.len() <= 1 << 20 {
+                        app.screen_picture(id, jpeg);
+                    }
+                    continue;
                 }
                 Some(Ok(_)) => continue,
                 _ => return,

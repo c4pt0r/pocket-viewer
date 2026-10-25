@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch};
 
@@ -29,6 +30,13 @@ struct Overlay {
     hud: BTreeMap<String, (String, String, f64)>, // "clientID/key" → (text, color, expires)
 }
 
+/// A browser sharing its camera to the StackChan's screen.
+#[derive(Default)]
+struct ScreenShare {
+    owner: Option<u64>, // the web session; the newest to send a picture wins
+    last: f64,          // when its last picture came
+}
+
 #[derive(Default)]
 struct Meter {
     window_start: f64,
@@ -47,6 +55,7 @@ pub struct App {
     saving: AtomicBool,
     overlay: Mutex<Overlay>,
     meter: Mutex<Meter>,
+    screen: Mutex<ScreenShare>,
     /// JSON messages for every browser.
     pub events: broadcast::Sender<String>,
     pub default_dir: PathBuf,
@@ -72,6 +81,7 @@ impl App {
             saving: AtomicBool::new(false),
             overlay: Mutex::new(Overlay::default()),
             meter: Mutex::new(Meter::default()),
+            screen: Mutex::new(ScreenShare::default()),
             events,
             default_dir,
         })
@@ -146,7 +156,8 @@ impl App {
             }
             Camera::StackChan(link) => {
                 let connected = link.state().is_some();
-                (json!({"kind": "stackchan", "name": "StackChan", "connected": connected, "width": w, "height": h, "fps": fps, "measuredFps": measured}),
+                (json!({"kind": "stackchan", "name": "StackChan", "connected": connected, "width": w, "height": h, "fps": fps, "measuredFps": measured,
+                        "screen": link.screen().map(|(w, h)| [w, h])}),
                  json!([]), json!([]))
             }
         };
@@ -172,7 +183,41 @@ impl App {
             "audio": {"input": audio.input, "output": audio.output, "monitoring": audio.monitoring, "level": self.audio.level_db()},
             "plugins": plugins, "pending": pending,
             "socket": self.plugins.address.lock().unwrap().clone(),
+            "screenShare": self.screen_owner(),
         })
+    }
+
+    // MARK: Sharing a browser's camera to the StackChan's screen
+
+    /// The web session whose camera is on the robot's screen, if any.
+    fn screen_owner(&self) -> Option<u64> {
+        let s = self.screen.lock().unwrap();
+        s.owner.filter(|_| crate::now() - s.last < 3.0) // the robot gives up after 3 s too
+    }
+
+    /// A JPEG from a browser's camera, for the robot's screen.
+    pub fn screen_picture(&self, session: u64, jpeg: Bytes) {
+        let Camera::StackChan(link) = &self.camera else { return };
+        if link.screen().is_none() {
+            return;
+        }
+        let mut s = self.screen.lock().unwrap();
+        if s.owner != Some(session) {
+            crate::log!("StackChan screen: showing web session {session}'s camera");
+        }
+        *s = ScreenShare { owner: Some(session), last: crate::now() };
+        link.show(jpeg);
+    }
+
+    /// The session stopped sharing, or went away.
+    pub fn screen_stop(&self, session: u64) {
+        let Camera::StackChan(link) = &self.camera else { return };
+        let mut s = self.screen.lock().unwrap();
+        if s.owner == Some(session) {
+            *s = ScreenShare::default();
+            link.show_off();
+            crate::log!("StackChan screen: web session {session} stopped sharing");
+        }
     }
 
     pub fn overlay_message(&self) -> String {

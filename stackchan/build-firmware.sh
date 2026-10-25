@@ -27,4 +27,15 @@ if [ "$(cat "$A/installed" 2>/dev/null)" != "$CORE $LIBS" ]; then
   arduino-cli cache clean                   # the downloaded archives
   echo "$CORE $LIBS" > "$A/installed"
 fi
+# The Arduino ctags for macOS is Intel-only. On Apple silicon without Rosetta,
+# build the same version natively (the arduino/ctags fork, plain C).
+CTAGS="$A/data/packages/builtin/tools/ctags/5.8-arduino11/ctags"
+if ! "$CTAGS" --version >/dev/null 2>&1; then
+  T=$(mktemp -d)
+  curl -sL https://github.com/arduino/ctags/archive/refs/tags/5.8-arduino11.tar.gz | tar xz -C "$T"
+  (cd "$T/ctags-5.8-arduino11" && sed -i '' 's/^# define __unused__  __attribute__((unused))$/# define __unused__/' general.h &&
+    ./configure >/dev/null && make >/dev/null)
+  mv "$CTAGS" "$CTAGS.x86_64" && cp "$T/ctags-5.8-arduino11/ctags" "$CTAGS"
+  rm -rf "$T"
+fi
 arduino-cli compile --fqbn "$FQBN" --build-path "$A/build" --output-dir stackchan-cam/build stackchan-cam

@@ -11,6 +11,7 @@
   <img id="video" alt="" draggable="false">
   <canvas id="overlay"></canvas>
   <div id="waiting">connecting…</div>
+  <video id="selfview" muted playsinline hidden title="Your camera, on the StackChan's screen"></video>
   <div id="hud"><div id="hud-plugins"></div><div id="hud-main"></div></div>
   <button id="menu-button" title="Settings (right-click anywhere)" aria-label="Settings">☰</button>
   <div id="toasts"></div>
@@ -54,6 +55,13 @@
     <label class="slider zoom-only">Zoom <input id="zoom" type="range" min="100" max="400" step="1"><b id="zoom-value"></b></label>
     <label class="slider roll-only">Roll <input id="roll" type="range" min="-30" max="30" step="1"><b id="roll-value"></b></label>
     <p id="no-gimbal" class="muted" hidden>No gimbal (yet): the Pocket 3 controls appear once it is connected.</p>
+  </section>
+
+  <section id="screen-section" hidden>
+    <h2>StackChan screen</h2>
+    <div class="row"><label><input id="share" type="checkbox"> Show my camera on the robot's screen</label></div>
+    <label class="wide">Camera <select id="share-camera"><option value="">Default</option></select></label>
+    <p id="share-note" class="muted small"></p>
   </section>
 
   <section>

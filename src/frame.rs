@@ -203,6 +203,20 @@ pub fn resize_rgb(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     out
 }
 
+/// Scales packed 3-byte pixels to fill dw×dh, cropping the middle of the
+/// longer side to keep the aspect ratio.
+pub fn cover_rgb(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh) = (sw as u64, sh as u64);
+    let (cw, ch) = if sw * dh as u64 > sh * dw as u64 { ((sh * dw as u64 / dh as u64).max(1), sh) } else { (sw, (sw * dh as u64 / dw as u64).max(1)) };
+    let (x0, y0) = ((sw - cw) / 2, (sh - ch) / 2);
+    let mut crop = Vec::with_capacity((cw * ch * 3) as usize);
+    for y in y0..y0 + ch {
+        let row = ((y * sw + x0) * 3) as usize;
+        crop.extend_from_slice(&src[row..row + (cw * 3) as usize]);
+    }
+    resize_rgb(&crop, cw as u32, ch as u32, dw, dh)
+}
+
 pub fn rgb_to_bgra(rgb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
     for px in rgb.chunks_exact(3) {
@@ -243,5 +257,14 @@ mod tests {
         assert_eq!(resize_rgb(&src, 2, 2, 1, 1), vec![127, 127, 127]);
         assert_eq!(fit_width(3840, 2160, 1920), (1920, 1080));
         assert_eq!(fit_width(320, 240, 640), (320, 240));
+    }
+
+    #[test]
+    fn cover_crops_the_middle() {
+        // 4×1: red, green, green, blue → 2×1 keeps the green middle.
+        let src = [255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 255];
+        assert_eq!(cover_rgb(&src, 4, 1, 2, 1), vec![0, 255, 0, 0, 255, 0]);
+        // 1×4 → 1×1 likewise.
+        assert_eq!(cover_rgb(&src, 1, 4, 1, 1), vec![0, 255, 0]);
     }
 }

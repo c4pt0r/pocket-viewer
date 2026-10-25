@@ -14,7 +14,8 @@ A viewer, recorder and gimbal controller for the **DJI Osmo Pocket 3** in webcam
 - **Audio**: record from any input (the Pocket 3 mic, a USB audio interface, BlackHole, …) and monitor it on any output device.
 - **Recording** to `.mov` with HEVC, H.264 or ProRes 422 video and AAC or 24-bit PCM audio, through ffmpeg (hardware encoders on macOS), plus full-resolution snapshots.
 - **Plugins**: external programs in any language receive the video, the audio and the gimbal state over a local socket. They can draw boxes, labels and subtitles over the picture, show their status in the HUD, react to clicks on it, steer the gimbal, and start recordings or take snapshots. Examples included: an **AI agent** you talk to that can see through the camera and steer it, **face follow**, **click-to-track**, **voice commands** and **live interpretation** (speech-to-subtitles plus translation), plus **hand gestures** as a teaching example.
-- Runs on **macOS, Windows and Linux**: one self-contained program; open its page in any browser on the same machine.
+- **Your camera on the StackChan's screen** (off by default): a browser viewing the page, on this machine or another, can show its own camera live on the robot's screen, for a video call through the robot. See [stackchan/README.md](stackchan/README.md#your-camera-on-its-screen).
+- Runs on **macOS, Windows and Linux**: one self-contained program; open its page in any browser on the same machine, or on others with `--host 0.0.0.0`.
 - `pocketctl`, a command-line gimbal controller.
 
 ## Requirements
@@ -57,6 +58,7 @@ On first launch, macOS asks for camera and microphone access. If you run the app
 | `-l` | list cameras, formats, audio devices and StackChans |
 | `--port N` | port of the web UI (default 8642; the next free one if taken) |
 | `--host ADDR` | address to serve on (default `127.0.0.1`; `0.0.0.0` lets other machines in, with no password) |
+| `--tls` | serve https, with a self-signed certificate made on first use (in `~/.config/pocket-viewer/tls`); browsers on other machines need it to use their camera |
 | `--no-open` | don't open the browser |
 
 | Key / mouse | |

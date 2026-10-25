@@ -12,6 +12,7 @@ mod plugins;
 mod record;
 mod settings;
 mod stackchan;
+mod tls;
 mod uvc;
 mod web;
 
@@ -60,6 +61,10 @@ struct Args {
     /// Address to serve on; 0.0.0.0 lets other machines on the network in (no password!)
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
+    /// Serve https, with a self-signed certificate: browsers on other machines
+    /// need it to use their camera (sharing it to the StackChan's screen)
+    #[arg(long)]
+    tls: bool,
     /// Don't open the browser
     #[arg(long)]
     no_open: bool,
@@ -151,23 +156,8 @@ async fn main() -> anyhow::Result<()> {
     let device = args.device.clone().unwrap_or_else(|| uvc::POCKET3.to_string());
     let (camera, backend, preferred_mic): (Camera, Option<Box<dyn gimbal::Backend>>, Option<&str>) =
         if device == "stackchan" || device.starts_with("stackchan:") {
-            let port = match device.strip_prefix("stackchan:") {
-                Some(p) => p.to_string(),
-                None => {
-                    let mut said = false;
-                    loop {
-                        if let Some(p) = stackchan::find_port() {
-                            break p;
-                        }
-                        if !said {
-                            log!("no StackChan on USB yet; plug it in (and press its power button)");
-                            said = true;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            };
-            let link = stackchan::Link::start(port, sink);
+            // Waits for the robot in the background, so the page comes up regardless.
+            let link = stackchan::Link::start(device.strip_prefix("stackchan:").map(String::from), sink);
             (Camera::StackChan(link.clone()), Some(Box::new(stackchan::Head::new(link))), None)
         } else {
             let cam = uvc::Uvc::start(device.clone(), width, height, args.fps, sink);
@@ -266,11 +256,19 @@ async fn main() -> anyhow::Result<()> {
     let listener = listener.ok_or_else(|| anyhow::anyhow!("no free port from {} up", args.port))?;
     let addr = listener.local_addr()?;
     let shown = if addr.ip().is_unspecified() { format!("127.0.0.1:{}", addr.port()) } else { addr.to_string() };
-    let url = format!("http://{shown}/");
+    let url = format!("{}://{shown}/", if args.tls { "https" } else { "http" });
     log!("pocket-viewer at {url}");
-    if !args.no_open {
-        let _ = webbrowser::open(&url);
+    if args.tls {
+        let config = tls::config().await?;
+        if !args.no_open {
+            let _ = webbrowser::open(&url);
+        }
+        axum_server::from_tcp_rustls(listener.into_std()?, config)?.serve(web::router(app).into_make_service()).await?;
+    } else {
+        if !args.no_open {
+            let _ = webbrowser::open(&url);
+        }
+        axum::serve(listener, web::router(app)).await?;
     }
-    axum::serve(listener, web::router(app)).await?;
     Ok(())
 }

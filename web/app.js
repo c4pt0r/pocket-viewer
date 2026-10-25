@@ -13,6 +13,8 @@ let ws = null;
 let step = 5;             // degrees per key press
 let scaling = localStorage.getItem("scaling") || "fill";
 let selection = null;     // ⌥-drag box, normalized {x, y, w, h}
+let session = null;       // this page's id on the server
+let share = null;         // this browser's camera, while it is on the StackChan's screen
 
 // MARK: Connection
 
@@ -29,6 +31,7 @@ function connect() {
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === "status") { status = m; render(); }
+    else if (m.type === "session") session = m.id;
     else if (m.type === "overlay") { overlay = m; draw(); renderHud(); }
     else if (m.type === "devices") renderDevices(m);
     else if (m.type === "toast") toast(m.text);
@@ -229,6 +232,7 @@ function render() {
   checkVideo();
   renderHud();
   draw();
+  if (share && status.screenShare != null && status.screenShare !== session) stopShare("Someone else's camera is on the StackChan's screen now.");
   if (panel.hidden) return;
   const s = status, c = s.camera, g = s.gimbal;
   $("camera-name").textContent = c.connected ? `${c.name} — ${c.width}×${c.height}` : `Waiting for ${c.name || "the camera"}…`;
@@ -271,6 +275,82 @@ function render() {
 
   renderPlugins();
   $("socket").textContent = s.socket;
+  renderShare();
+}
+
+function renderShare() {
+  const c = status.camera;
+  $("screen-section").hidden = c.kind !== "stackchan";
+  if (c.kind !== "stackchan") return;
+  const secure = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+  $("share").checked = !!share;
+  $("share").disabled = !share && (!secure || !c.screen);
+  $("share-note").textContent =
+    !secure ? "The browser allows the camera only on https or localhost: start pocket-viewer with --tls, then open its https:// address."
+    : !c.connected ? "Waiting for the StackChan."
+    : !c.screen ? "The robot's firmware cannot show pictures: update it with stackchan/flash.sh."
+    : share ? `On the robot's ${c.screen[0]}×${c.screen[1]} screen, about 10 pictures a second. Only one camera at a time: the latest to start wins.`
+    : "Off. Your camera is used only while this is on.";
+}
+
+// MARK: Sharing this browser's camera to the StackChan's screen
+
+async function startShare() {
+  const deviceId = $("share-camera").value;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+  } catch (e) {
+    toast(`Cannot use the camera: ${e.message || e.name}`);
+    return renderShare();
+  }
+  const cam = $("selfview");
+  cam.srcObject = stream;
+  cam.hidden = false;
+  cam.play().catch(() => {});
+  const pic = document.createElement("canvas");
+  let busy = false;
+  // About 10 a second, and none while the last is still on its way.
+  const timer = setInterval(() => {
+    const size = status?.camera?.screen;
+    if (busy || !size || !cam.videoWidth || ws?.readyState !== WebSocket.OPEN || ws.bufferedAmount > 64 * 1024) return;
+    const [w, h] = size;
+    pic.width = w; pic.height = h;
+    // Fill the screen: crop the middle of the camera's longer side.
+    const s = Math.max(w / cam.videoWidth, h / cam.videoHeight);
+    const sw = w / s, sh = h / s;
+    pic.getContext("2d").drawImage(cam, (cam.videoWidth - sw) / 2, (cam.videoHeight - sh) / 2, sw, sh, 0, 0, w, h);
+    busy = true;
+    pic.toBlob((b) => { busy = false; if (b && share && ws?.readyState === WebSocket.OPEN) ws.send(b); }, "image/jpeg", 0.7);
+  }, 100);
+  share = { stream, timer };
+  stream.getVideoTracks()[0]?.addEventListener("ended", () => stopShare("The camera went away."));
+  listCameras();
+  renderShare();
+}
+
+function stopShare(reason) {
+  if (!share) return;
+  clearInterval(share.timer);
+  share.stream.getTracks().forEach((t) => t.stop());
+  share = null;
+  const cam = $("selfview");
+  cam.hidden = true;
+  cam.srcObject = null;
+  send("screenStop");
+  if (reason) toast(reason);
+  if (status) renderShare();
+}
+
+// The browser names its cameras only once one has been allowed.
+async function listCameras() {
+  const devices = await navigator.mediaDevices?.enumerateDevices?.().catch(() => []) || [];
+  const cams = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+  const current = share?.stream.getVideoTracks()[0]?.getSettings().deviceId ?? $("share-camera").value;
+  fillSelect($("share-camera"), [["", "Default"], ...cams.map((d, i) => [d.deviceId, d.label || `Camera ${i + 1}`])], current);
 }
 
 function renderPlugins() {
@@ -503,6 +583,8 @@ $("output-dir").onchange = (e) => send("outputDir", { value: e.target.value });
 $("audio-input").onchange = (e) => send("audioInput", { name: e.target.value || null });
 $("audio-output").onchange = (e) => send("audioOutput", { name: e.target.value || null });
 $("monitor").onchange = (e) => send("monitor", { on: e.target.checked });
+$("share").onchange = (e) => (e.target.checked ? startShare() : stopShare());
+$("share-camera").onchange = () => { if (share) { stopShare(); startShare(); } };
 $("launch-catalog").onclick = () => $("catalog").value && send("launchPlugin", { command: $("catalog").value });
 $("launch-command").onclick = () => { send("launchPlugin", { command: $("command").value }); $("command").value = ""; };
 $("command").onkeydown = (e) => { if (e.key === "Enter") $("launch-command").click(); };

@@ -4,19 +4,22 @@
 //! move commands down:
 //!
 //!   up    "SCF1", a type byte ('J' JPEG, 'S' state JSON), u32 LE length, payload
-//!   down  text lines: "stream" (re-sent every second, or it stops), "move YAW PITCH"
+//!   down  text lines: "stream" (re-sent every second, or it stops), "move YAW PITCH",
+//!         "show LENGTH" and that many bytes of JPEG for its screen, "show off"
 //!
 //! Yaw and pitch are pan and tilt as on the Pocket 3: + turns the camera right
 //! and up.
 
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
 
-use crate::frame::{jpeg_size, Frame, Pixels};
+use crate::frame::{cover_rgb, decode_jpeg, encode_jpeg, jpeg_size, Frame, Pixels};
 use crate::gimbal::{Backend, Range};
 
 /// The serial port of a StackChan on USB (an Espressif device, VID 0x303a).
@@ -29,32 +32,126 @@ pub fn find_port() -> Option<String> {
 }
 
 pub struct Link {
-    port: String,
-    writer: Mutex<Option<Box<dyn serialport::SerialPort>>>,
+    fixed: Option<String>, // the port given with -d stackchan:PORT; else found on USB
+    writer: Mutex<Option<Box<dyn serialport::SerialPort>>>, // used by the tx thread only, once set
+    write_failed: AtomicBool, // the tx thread lost the port; the reader reconnects
     state: Mutex<Option<Value>>, // the robot's last report
+    tx: (Mutex<Tx>, Condvar),
+}
+
+/// What waits to go down to the robot. One thread writes it all, so the reader
+/// never waits on a write: a write can block while the robot is busy sending,
+/// and the robot gets to read only once we have read what it sends.
+#[derive(Default)]
+struct Tx {
+    lines: VecDeque<String>,
+    picture: Option<Picture>, // only the newest
+}
+
+enum Picture {
+    Show(Bytes),
+    Off,
 }
 
 pub type FrameSink = Arc<dyn Fn(Frame) + Send + Sync>;
 
 impl Link {
     /// Connects on a thread of its own and keeps reconnecting, so the robot can
-    /// be unplugged or reset while the app runs.
-    pub fn start(port: String, on_frame: FrameSink) -> Arc<Link> {
-        let link = Arc::new(Link { port, writer: Mutex::new(None), state: Mutex::new(None) });
+    /// be plugged in late, unplugged or reset while the app runs. Without a
+    /// port, it looks for one on USB.
+    pub fn start(port: Option<String>, on_frame: FrameSink) -> Arc<Link> {
+        let link = Arc::new(Link {
+            fixed: port,
+            writer: Mutex::new(None),
+            write_failed: AtomicBool::new(false),
+            state: Mutex::new(None),
+            tx: Default::default(),
+        });
         let l = link.clone();
         std::thread::Builder::new().name("stackchan".into()).spawn(move || l.run(on_frame)).unwrap();
+        let l = link.clone();
+        std::thread::Builder::new().name("stackchan-tx".into()).spawn(move || l.run_tx()).unwrap();
         link
+    }
+
+    /// The robot's screen size, if its firmware can show pictures (stackchan-cam 2).
+    pub fn screen(&self) -> Option<(u32, u32)> {
+        let st = self.state()?;
+        let s = st.get("screen")?.as_array()?;
+        let (w, h) = (s.first()?.as_u64()? as u32, s.get(1)?.as_u64()? as u32);
+        (w > 0 && h > 0).then_some((w, h))
+    }
+
+    /// Puts a JPEG on the robot's screen, scaled to fill it. Returns at once; a
+    /// picture still waiting when the next arrives is dropped.
+    pub fn show(&self, jpeg: Bytes) {
+        self.tx.0.lock().unwrap().picture = Some(Picture::Show(jpeg));
+        self.tx.1.notify_one();
+    }
+
+    /// Back to the robot's status screen.
+    pub fn show_off(&self) {
+        self.tx.0.lock().unwrap().picture = Some(Picture::Off);
+        self.tx.1.notify_one();
     }
 
     pub fn state(&self) -> Option<Value> {
         self.state.lock().unwrap().clone()
     }
 
+    /// Queues a command for the robot.
     pub fn send_line(&self, line: &str) {
-        let mut w = self.writer.lock().unwrap();
-        if let Some(port) = w.as_mut() {
-            if port.write_all(format!("{line}\n").as_bytes()).is_err() {
-                *w = None; // the reader notices too, and reconnects
+        let mut tx = self.tx.0.lock().unwrap();
+        if tx.lines.len() >= 64 {
+            tx.lines.pop_front(); // not connected, or not reading: keep the newest
+        }
+        tx.lines.push_back(format!("{line}\n"));
+        self.tx.1.notify_one();
+    }
+
+    /// The tx thread: commands first, then the newest picture, and "stream" every second.
+    fn run_tx(&self) {
+        let mut last_stream = Instant::now() - Duration::from_secs(1);
+        loop {
+            let (data, picture) = {
+                let mut tx = self.tx.0.lock().unwrap();
+                loop {
+                    if let Some(line) = tx.lines.pop_front() {
+                        break (line.into_bytes(), None);
+                    }
+                    if let Some(p) = tx.picture.take() {
+                        break (Vec::new(), Some(p));
+                    }
+                    let due = Duration::from_secs(1).saturating_sub(last_stream.elapsed());
+                    if due.is_zero() {
+                        last_stream = Instant::now();
+                        break (b"stream\n".to_vec(), None);
+                    }
+                    tx = self.tx.1.wait_timeout(tx, due).unwrap().0;
+                }
+            };
+            let data = match picture {
+                None => data,
+                Some(Picture::Off) => b"show off\n".to_vec(),
+                Some(Picture::Show(jpeg)) => {
+                    let Some((w, h)) = self.screen() else { continue };
+                    // Re-encoded here so the robot always gets a baseline JPEG
+                    // of its screen's size, whatever the browser sent.
+                    let Some((sw, sh, rgb)) = decode_jpeg(&jpeg) else { continue };
+                    let Some(out) = encode_jpeg(&cover_rgb(&rgb, sw, sh, w, h), w, h, 70) else { continue };
+                    // The newline first: if the robot ever lost bytes of a picture
+                    // (its USB queue overflowed), it is back in step at the next one.
+                    let mut packet = format!("\nshow {}\n", out.len()).into_bytes();
+                    packet.extend_from_slice(&out);
+                    packet
+                }
+            };
+            let mut w = self.writer.lock().unwrap();
+            if let Some(port) = w.as_mut() {
+                if port.write_all(&data).is_err() {
+                    *w = None;
+                    self.write_failed.store(true, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -62,12 +159,20 @@ impl Link {
     fn run(self: Arc<Self>, on_frame: FrameSink) {
         let mut last_error = String::new();
         loop {
-            match self.session(&on_frame) {
-                Ok(()) => crate::log!("StackChan: {} disconnected, waiting for it", self.port),
+            let Some(port) = self.fixed.clone().or_else(find_port) else {
+                if last_error != "missing" {
+                    crate::log!("no StackChan on USB yet; plug it in (and press its power button)");
+                    last_error = "missing".into();
+                }
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            };
+            match self.session(&port, &on_frame) {
+                Ok(()) => crate::log!("StackChan: {port} disconnected, waiting for it"),
                 Err(e) => {
                     let e = e.to_string();
                     if e != last_error {
-                        crate::log!("StackChan: cannot use {}: {e}", self.port);
+                        crate::log!("StackChan: cannot use {port}: {e}");
                         last_error = e;
                     }
                 }
@@ -79,26 +184,26 @@ impl Link {
     }
 
     /// One connection, until the port goes away.
-    fn session(&self, on_frame: &FrameSink) -> anyhow::Result<()> {
-        let mut port = serialport::new(&self.port, 115_200).timeout(Duration::from_millis(200)).open()?;
+    fn session(&self, path: &str, on_frame: &FrameSink) -> anyhow::Result<()> {
+        let mut port = serialport::new(path, 115_200).timeout(Duration::from_millis(200)).open()?;
         // DTR on tells the robot's USB CDC someone is listening. RTS stays off:
         // RTS without DTR is half of the sequence that reboots it into the bootloader.
-        port.write_data_terminal_ready(true)?;
-        port.write_request_to_send(false)?;
-        *self.writer.lock().unwrap() = Some(port.try_clone()?);
-        crate::log!("StackChan: connected on {}", self.port);
+        // Best effort: a virtual port (a pty) has neither line.
+        let _ = port.write_data_terminal_ready(true);
+        let _ = port.write_request_to_send(false);
+        self.tx.0.lock().unwrap().lines.clear(); // stale commands from before
+        self.write_failed.store(false, Ordering::Relaxed);
+        let mut writer = port.try_clone()?;
+        writer.set_timeout(Duration::from_secs(1))?; // the robot may be busy sending for a while
+        *self.writer.lock().unwrap() = Some(writer);
+        crate::log!("StackChan: connected on {path}");
         self.send_line("stream");
 
         let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
         let mut chunk = vec![0u8; 1 << 16];
-        let mut last_keepalive = Instant::now();
         let mut frames = 0u64;
         loop {
-            if last_keepalive.elapsed() >= Duration::from_secs(1) {
-                self.send_line("stream");
-                last_keepalive = Instant::now();
-            }
-            if self.writer.lock().unwrap().is_none() {
+            if self.write_failed.load(Ordering::Relaxed) {
                 return Ok(());
             }
             let n = match port.read(&mut chunk) {
