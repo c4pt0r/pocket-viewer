@@ -54,11 +54,11 @@ class Detector:
                 self.size = (w, h)
             _, found = self.yunet.detect(bgr)
             for f in found if found is not None else []:
-                faces.append((f[0] / w, f[1] / h, f[2] / w, f[3] / h, float(f[14])))
+                faces.append((float(f[0]) / w, float(f[1]) / h, float(f[2]) / w, float(f[3]) / h, float(f[14])))
         else:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             for x, y, fw, fh in self.haar.detectMultiScale(gray, 1.1, 5, minSize=(24, 24)):
-                faces.append((x / w, y / h, fw / w, fh / h, 1.0))
+                faces.append((int(x) / w, int(y) / h, int(fw) / w, int(fh) / h, 1.0))
         return sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
 
 
