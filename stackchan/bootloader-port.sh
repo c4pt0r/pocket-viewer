@@ -2,20 +2,30 @@
 # Prints the serial port of a StackChan's ROM bootloader, rebooting it there
 # first if it runs stackchan-cam.
 #
-#   stackchan/bootloader-port.sh [PORT]   PORT defaults to the first /dev/cu.usbmodem*
+#   stackchan/bootloader-port.sh [PORT]   PORT defaults to the first /dev/cu.usbmodem* (macOS) or /dev/ttyACM* (Linux)
 #
 # stackchan-cam uses TinyUSB, which esptool cannot reset on its own: opening the
 # port at 1200 baud reboots the robot into the bootloader, which comes back as
-# a different port. Already in the bootloader (or on factory firmware, which
-# uses the chip's USB-Serial-JTAG), nothing changes and PORT is printed as is.
+# a different port on macOS, and usually under the same name on Linux. Already
+# in the bootloader (or on factory firmware, which uses the chip's
+# USB-Serial-JTAG), nothing changes and PORT is printed as is.
 set -e
-PORT=${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}
-[ -n "$PORT" ] || { echo "no StackChan on USB (expected /dev/cu.usbmodem*)" >&2; exit 1; }
-before=$(ls /dev/cu.usbmodem* 2>/dev/null)
-stty -f "$PORT" 1200 2>/dev/null || true
+if [ "$(uname)" = Darwin ]; then
+  GLOB='/dev/cu.usbmodem*' STTY='stty -f'
+else
+  GLOB='/dev/ttyACM*' STTY='stty -F'
+fi
+ports() { ls $GLOB 2>/dev/null || true; }
+PORT=${1:-$(ports | head -1)}
+[ -n "$PORT" ] || { echo "no StackChan on USB (expected $GLOB)" >&2; exit 1; }
+before=$(ports)
+$STTY "$PORT" 1200 2>/dev/null || true
+gone=
 for _ in $(seq 50); do
   sleep 0.1
-  new=$(ls /dev/cu.usbmodem* 2>/dev/null | grep -vxF "$before" | head -1 || true)
+  new=$(ports | grep -vxF "$before" | head -1 || true)
   [ -n "$new" ] && { PORT=$new; break; }
+  [ -e "$PORT" ] || gone=1
+  [ -n "$gone" ] && [ -w "$PORT" ] && break  # back under the same name
 done
 echo "$PORT"

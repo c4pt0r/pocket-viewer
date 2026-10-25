@@ -33,7 +33,7 @@ CTAGS="$A/data/packages/builtin/tools/ctags/5.8-arduino11/ctags"
 if ! "$CTAGS" --version >/dev/null 2>&1; then
   T=$(mktemp -d)
   curl -sL https://github.com/arduino/ctags/archive/refs/tags/5.8-arduino11.tar.gz | tar xz -C "$T"
-  (cd "$T/ctags-5.8-arduino11" && sed -i '' 's/^# define __unused__  __attribute__((unused))$/# define __unused__/' general.h &&
+  (cd "$T/ctags-5.8-arduino11" && sed -i.orig 's/^# define __unused__  __attribute__((unused))$/# define __unused__/' general.h &&
     ./configure >/dev/null && make >/dev/null)
   mv "$CTAGS" "$CTAGS.x86_64" && cp "$T/ctags-5.8-arduino11/ctags" "$CTAGS"
   rm -rf "$T"

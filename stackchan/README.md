@@ -79,7 +79,7 @@ This needs firmware version 2 (`stackchan-cam 2`). With older firmware, the pane
 
 ## Protocol
 
-The robot is a serial port (`/dev/cu.usbmodem…`, Espressif's USB vendor ID 0x303a). It sends nothing until it hears `stream`.
+The robot is a serial port (`/dev/cu.usbmodem…` on macOS, `/dev/ttyACM…` on Linux; Espressif's USB vendor ID 0x303a). It sends nothing until it hears `stream`.
 
 | | |
 |---|---|

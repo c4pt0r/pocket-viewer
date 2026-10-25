@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds stackchan-cam and flashes it to a StackChan on USB.
 #
-#   stackchan/flash.sh [PORT]      PORT defaults to the first /dev/cu.usbmodem*
+#   stackchan/flash.sh [PORT]      PORT defaults to the first /dev/cu.usbmodem* (macOS) or /dev/ttyACM* (Linux)
 #
 # Needs arduino-cli and uv; build-firmware.sh installs the pinned toolchain on
 # first use. Writes the bootloader, the partition table (the factory one) and
