@@ -240,6 +240,9 @@ static void format_state(char *json, size_t size) {
            camera_ok ? "true" : "false", screen_width, screen_height, kVersion, reset_reason, wdt_task, wdt_cpu, cpu_report);
 }
 
+// Where the head was last told to go, in tenths of a degree; the eyes look there.
+static volatile int target_yaw, target_pitch = kPitchMin;
+
 // "move YAW PITCH [SPEED]" or "home". Yaw + turns the camera right: M5Stack's
 // examples call it "left", as seen from in front of the robot.
 static void run_command(char *line) {
@@ -248,10 +251,12 @@ static void run_command(char *line) {
   if (!strcmp(cmd, "move")) {
     char *yaw = strtok(nullptr, " \t\r"), *pitch = strtok(nullptr, " \t\r"), *speed = strtok(nullptr, " \t\r");
     if (!yaw || !pitch) return;
-    M5StackChan.Motion.move(constrain((int)lroundf(atof(yaw) * 10), -kYawLimit, kYawLimit),
-                            constrain((int)lroundf(atof(pitch) * 10), kPitchMin, kPitchMax),
-                            speed ? constrain(atoi(speed), 0, 1000) : kDefaultSpeed);
+    target_yaw = constrain((int)lroundf(atof(yaw) * 10), -kYawLimit, kYawLimit);
+    target_pitch = constrain((int)lroundf(atof(pitch) * 10), kPitchMin, kPitchMax);
+    M5StackChan.Motion.move(target_yaw, target_pitch, speed ? constrain(atoi(speed), 0, 1000) : kDefaultSpeed);
   } else if (!strcmp(cmd, "home")) {
+    target_yaw = 0;
+    target_pitch = kPitchMin;
     M5StackChan.Motion.move(0, kPitchMin, kDefaultSpeed);
   } else if (!strcmp(cmd, "show")) {
     show_off = true;  // "show off"; "show LENGTH" is taken by usb_task
@@ -331,6 +336,111 @@ static void usb_task(void *) {
 
 static bool showing_picture;
 
+// While the Mac streams, the status screen is a pair of WALL-E-like eyes. They
+// look where the head is turning, ahead of it, wander a little while it is
+// still, blink now and then, and smile ^_^ when it comes to rest after a move.
+static const int kEyesTop = 40, kEyesHeight = 160;  // the band of the screen they take
+static const int kEyeW = 124, kEyeH = 104;           // one eye's housing
+static M5Canvas *eyes;  // PSRAM, screen width × kEyesHeight; null if it did not fit
+
+struct EyesPose {
+  int gx, gy;  // gaze in 1/16ths, −16…16: + is the robot's right (the screen's left) and up
+  int lid;     // how far the lids are down, in pixels
+  bool happy;
+  bool operator==(const EyesPose &o) const { return gx == o.gx && gy == o.gy && lid == o.lid && happy == o.happy; }
+};
+
+// (Takes the pose's fields: Arduino declares functions above the sketch, before
+// EyesPose is.)
+static void draw_eyes(int gaze_x, int gaze_y, int lid, bool happy) {
+  static const uint32_t black = 0x000000, rim = 0x464b52, metal = 0xa3aab2, lens = 0x0e141b, iris = 0x2b5878,
+                        iris_in = 0x173247, pupil = 0x040608, white = 0xffffff, blush = 0xff7d9a;
+  auto &c = *eyes;
+  c.fillScreen(black);
+  float sx = -gaze_x / 16.0f, sy = gaze_y / 16.0f;  // on the screen: + right, + up
+  int mid = c.width() / 2;
+  for (int side = -1; side <= 1; side += 2) {  // −1: the eye on the screen's left
+    int cx = mid + side * 74 + lroundf(sx * 6), cy = kEyesHeight / 2 - lroundf(sy * 5);
+    int top = cy - kEyeH / 2, left = cx - kEyeW / 2;
+    c.fillSmoothRoundRect(left, top, kEyeW, kEyeH, 40, rim);
+    c.fillSmoothRoundRect(left + 5, top + 5, kEyeW - 10, kEyeH - 10, 35, metal);
+    if (happy) {  // the bottom bitten off leaves an arch: ^
+      c.fillSmoothCircle(cx, cy + 50, 70, black);
+      c.fillEllipse(cx + side * 34, cy + 29, 17, 5, blush);
+      continue;
+    }
+    int lx = cx + lroundf(sx * 4), ly = cy - lroundf(sy * 3);
+    c.fillSmoothCircle(lx, ly, 40, lens);
+    int px = lx + lroundf(sx * 9), py = ly - lroundf(sy * 7);
+    c.fillSmoothCircle(px, py, 27, iris);
+    c.fillSmoothCircle(px, py, 22, iris_in);
+    c.fillSmoothCircle(px, py, 14, pupil);
+    c.fillSmoothCircle(px - 11, py - 11, 7, white);
+    c.fillSmoothCircle(px + 10, py + 9, 3, white);
+    // The lid: level at the inner corner, slanting down to the outer one.
+    int inner = cx - side * (kEyeW / 2 + 3), outer = cx + side * (kEyeW / 2 + 3), y = top - 3 + lid;
+    c.fillRect(std::min(inner, outer), top - 4, abs(outer - inner) + 1, y - top + 5, black);
+    c.fillTriangle(inner, y, outer, y, outer, y + 30, black);
+    c.drawWideLine(inner, y, outer, y + 30, 1.0f, black);  // smooths the slanted edge
+  }
+  if (happy) c.fillSmoothRoundRect(mid - 12, kEyesHeight / 2 + 30, 24, 6, 3, metal);  // the _ in ^_^
+  c.pushSprite(0, kEyesTop);
+}
+
+// Moves the eyes on, about 30 times a second, drawing them when they change.
+static void animate_eyes(bool redraw) {
+  static float gx, gy, wander_x, wander_y;  // gaze, −1…1
+  static uint32_t last_ms, next_wander, next_blink, blink_start, happy_until, last_happy, next_idle_happy;
+  static bool was_moving;
+  static int from_yaw, from_pitch;
+  static EyesPose shown;
+  uint32_t now = millis();
+  if (!redraw && now - last_ms < 33) return;
+  last_ms = now;
+  if (redraw) next_blink = next_idle_happy = 0;
+
+  auto at = M5StackChan.Motion.getCurrentAngles();
+  bool moving = M5StackChan.Motion.isMoving();
+  if (moving && !was_moving) from_yaw = at.x, from_pitch = at.y;
+  if (!moving && was_moving && abs(at.x - from_yaw) + abs(at.y - from_pitch) >= 40 && now - last_happy > 10000)
+    happy_until = now + 1500, last_happy = now;  // turned to someone: ^_^
+  was_moving = moving;
+  if (!next_idle_happy) next_idle_happy = now + random(20000, 40000);
+  if (now >= next_idle_happy) {
+    next_idle_happy = now + random(20000, 40000);
+    if (!moving) happy_until = now + 1500, last_happy = now;
+  }
+
+  // Ahead of the head while it turns; while it is still, at whoever is in
+  // front, glancing about now and then.
+  if (moving) {
+    wander_x = wander_y = 0;
+  } else if (now >= next_wander) {
+    next_wander = now + random(1200, 4000);
+    bool back = random(10) < 4;
+    wander_x = back ? 0 : random(-35, 36) / 100.0f;
+    wander_y = back ? 0 : random(-25, 26) / 100.0f;
+  }
+  float want_x = constrain((target_yaw - at.x) / 250.0f + wander_x, -1.0f, 1.0f);
+  float want_y = constrain((target_pitch - at.y) / 250.0f + wander_y, -1.0f, 1.0f);
+  gx += (want_x - gx) * 0.35f;
+  gy += (want_y - gy) * 0.35f;
+
+  bool happy = now < happy_until;
+  if (!next_blink) next_blink = now + random(1500, 4000);
+  if (now >= next_blink) {
+    blink_start = now;
+    next_blink = now + (random(5) ? random(2500, 6000) : 350);  // now and then a double blink
+  }
+  int lid = 0;
+  if (!happy && now - blink_start < 200) lid = lroundf((1 - fabsf((now - blink_start) / 100.0f - 1)) * (kEyeH + 34));
+
+  EyesPose pose = {(int)lroundf(gx * 16), (int)lroundf(gy * 16), lid, happy};
+  if (!redraw && pose == shown) return;
+  shown = pose;
+  draw_eyes(pose.gx, pose.gy, pose.lid, pose.happy);
+}
+
 static void show_status() {
   static int shown = -1;
   if (showing_picture) {
@@ -339,10 +449,17 @@ static void show_status() {
     showing_picture = false;
     shown = -1;
   }
-  if (shown == streaming) return;
-  shown = streaming;
+  bool fresh = shown != streaming;
+  if (fresh) {
+    shown = streaming;
+    M5StackChan.Display().fillScreen(TFT_BLACK);
+  }
+  if (streaming && camera_ok && eyes) {
+    animate_eyes(fresh);
+    return;
+  }
+  if (!fresh) return;
   auto &d = M5StackChan.Display();
-  d.fillScreen(TFT_BLACK);
   d.setTextDatum(middle_center);
   d.setFont(&fonts::FreeSansBold12pt7b);
   d.setTextColor(camera_ok ? TFT_GREENYELLOW : TFT_RED);
@@ -384,6 +501,12 @@ void setup() {
   show_lock = xSemaphoreCreateMutex();
   for (auto &b : show_buf) b = (uint8_t *)heap_caps_malloc(kMaxShow, MALLOC_CAP_SPIRAM);
   if (!show_buf[0] || !show_buf[1] || !show_buf[2]) screen_width = screen_height = 0;
+  eyes = new M5Canvas(&M5StackChan.Display());  // in PSRAM
+  eyes->setColorDepth(16);
+  if (!eyes->createSprite(screen_width ? screen_width : 320, kEyesHeight)) {
+    delete eyes;
+    eyes = nullptr;
+  }
   camera_ok = init_camera();
   if (camera_ok) xTaskCreatePinnedToCore(encoder_task, "encoder", 6144, nullptr, 4, nullptr, 1);
   xTaskCreatePinnedToCore(usb_task, "usb", 6144, nullptr, 5, nullptr, 0);
